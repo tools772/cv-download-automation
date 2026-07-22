@@ -1,0 +1,127 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            dist_script: dist:win
+            artifact_name: fetch-agent-installer-windows
+            upload_glob: |
+              recruiter/installers/*.exe
+              recruiter/installers/*.exe.blockmap
+          - os: macos-latest
+            label: macos
+            dist_script: dist:mac
+            artifact_name: fetch-agent-installer-macos
+            upload_glob: |
+              recruiter/installers/*.dmg
+              recruiter/installers/*.dmg.blockmap
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+
+      - name: Cache electron-builder (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: ${{ matrix.label }}-electron-builder-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ matrix.label }}-electron-builder-
+
+      - name: Cache electron-builder (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: ${{ matrix.label }}-electron-builder-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ matrix.label }}-electron-builder-
+
+      - name: Verify Supabase secrets
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
+            echo "::error::Missing GitHub Actions secrets SUPABASE_URL and/or SUPABASE_ANON_KEY."
+            echo "Add them under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer (${{ matrix.label }})
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: npm run ${{ matrix.dist_script }}
+
+      - name: List installer output
+        shell: bash
+        run: ls -la recruiter/installers/ || dir recruiter\\installers
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.upload_glob }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fetch-agent-installer-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: find release-assets -type f
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

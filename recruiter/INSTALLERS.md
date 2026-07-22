@@ -17,16 +17,21 @@ Requires Node 18+ and `npm install` in repo root first.
 npm run build:dmg -- --portal-env ../ats-perfect-ventures/.env.local
 ```
 
-**Windows .exe** — built on GitHub Actions (no Windows laptop needed):
+**Windows .exe** and **macOS .dmg** — built together via GitHub Actions:
 
 1. Add repo secrets `SUPABASE_URL` and `SUPABASE_ANON_KEY` (see [`.github/README.md`](../.github/README.md))
-2. **Actions** → **Build Windows installer** → **Run workflow**
-3. Download `.exe` from **Artifacts** (or **Releases** if you pushed a `v*` tag)
-
-Local alternative (Windows machine):
+2. **Actions** → **Build installers** → **Run workflow**
+3. Download from **Artifacts**, or push a `v*` tag for a **GitHub Release**
 
 ```bash
-npm run build:exe -- --portal-env ../ats-perfect-ventures/.env.local
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Local builds:
+
+```bash
+npm run dist:mac -- --portal-env ../ats-perfect-ventures/.env.local   # Mac
+npm run dist:win -- --portal-env ../ats-perfect-ventures/.env.local   # Windows
 ```
 
 **Both** (on Mac builds dmg only; on Windows builds exe only):

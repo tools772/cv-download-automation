@@ -45,7 +45,13 @@ Build installers:
 npm run build:dmg -- --portal-env ../ats-perfect-ventures/.env.local   # Mac only
 ```
 
-**Windows .exe:** use GitHub Actions (see [`.github/README.md`](../.github/README.md)) — set `SUPABASE_URL` + `SUPABASE_ANON_KEY` secrets, run **Build Windows installer**.
+**Windows .exe + macOS .dmg:** GitHub Actions workflow **`build.yml`** (see [`.github/README.md`](../.github/README.md))
+
+```bash
+# Secrets: SUPABASE_URL, SUPABASE_ANON_KEY
+# Actions → Build installers → Run workflow
+# Or: git tag v0.1.0 && git push origin v0.1.0
+```
 
 ---
 

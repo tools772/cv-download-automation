@@ -19,11 +19,12 @@ Windows: run **`install-fetch-agent.bat`**, then **`start-fetch-agent.bat`**.
 
 ## Package for recruiters
 
-**Desktop app (recommended):** build `.dmg` locally / `.exe` via GitHub Actions → **`recruiter/installers/`** — see **[recruiter/INSTALLERS.md](./recruiter/INSTALLERS.md)** and **[`.github/README.md`](./.github/README.md)**
+**Desktop app (recommended):** `.dmg` + `.exe` via GitHub Actions — see **[`.github/README.md`](./.github/README.md)**
 
 ```bash
-npm run build:dmg -- --portal-env ../ats-perfect-ventures/.env.local   # Mac
-# Windows .exe → GitHub Actions → Build Windows installer
+npm run dist:mac -- --portal-env ../ats-perfect-ventures/.env.local   # local Mac
+npm run dist:win -- --portal-env ../ats-perfect-ventures/.env.local   # local Windows
+# CI: git tag v0.1.0 && git push origin v0.1.0
 ```
 
 **Zip (CLI + Node.js):**

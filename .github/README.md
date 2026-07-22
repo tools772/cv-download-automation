@@ -1,46 +1,81 @@
-# GitHub Actions — Windows installer
+# GitHub Actions — Build installers
 
-Workflow: [build-windows-installer.yml](./workflows/build-windows-installer.yml)
+Uses **electron-builder** (configured in root `package.json` → `"build"`).
 
-## Required repository secrets
+Workflow: [build.yml](./workflows/build.yml)
 
-Add in **GitHub → Settings → Secrets and variables → Actions**:
+## What it builds
 
-| Secret | Value |
+| Runner | Output |
 |--------|--------|
-| `SUPABASE_URL` | Same as `VITE_SUPABASE_URL` in the ATS portal (e.g. `https://xxx.supabase.co`) |
-| `SUPABASE_ANON_KEY` | Same as `VITE_SUPABASE_ANON_KEY` in the ATS portal |
+| `windows-latest` | NSIS `.exe` |
+| `macos-latest` | `.dmg` |
 
-These are embedded in the installer at build time (anon key only — same as the public portal client).
+Artifacts are uploaded per platform. Tag pushes (`v*`) also create a GitHub Release with both installers attached.
 
-## Run the workflow
+## Required secrets (build time)
+
+| Secret | Purpose |
+|--------|---------|
+| `SUPABASE_URL` | Embedded in installer (`config/team.defaults.env`) |
+| `SUPABASE_ANON_KEY` | Same as portal anon key |
+
+Add under **Settings → Secrets and variables → Actions**.
+
+The workflow fails immediately if either secret is missing.
+
+## Trigger a build
 
 ### Manual
 
-1. Push this repo to GitHub
-2. **Actions** → **Build Windows installer** → **Run workflow**
+**Actions** → **Build installers** → **Run workflow**
 
-### On release tag
-
-Push a version tag to auto-build and attach the `.exe` to a GitHub Release:
+### Release (both .exe + .dmg on Release page)
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-## Download the .exe
+Bump `version` in `package.json` before tagging when releasing a new version.
 
-After a successful run:
+## Download artifacts
 
-1. Open the workflow run in **Actions**
-2. **Artifacts** → **perfect-ventures-fetch-agent-windows-exe**
-3. Unzip → `Perfect Ventures Fetch Agent Setup *.exe`
+- **Manual run:** open the workflow run → **Artifacts** → `fetch-agent-installer-windows` / `fetch-agent-installer-macos`
+- **Tag run:** **Releases** → pick the tag → download assets
 
-For tag builds, the `.exe` is also on the **Releases** page.
-
-## Local Windows build (optional)
+## Local builds (same as CI)
 
 ```bash
-npm run build:exe -- --portal-env ../ats-perfect-ventures/.env.local
+npm ci
+npm run prepare:bundle -- --portal-env ../ats-perfect-ventures/.env.local
+npm run dist:win   # Windows only
+npm run dist:mac   # macOS only
+npm run dist       # current OS only
 ```
+
+Or one step with env vars:
+
+```bash
+export SUPABASE_URL=...
+export SUPABASE_ANON_KEY=...
+npm ci && npm run prepare:bundle && npm run dist:mac
+```
+
+## Future secrets (code signing — not configured yet)
+
+When you enable signing later, add:
+
+| Secret | Platform | Purpose |
+|--------|----------|---------|
+| `APPLE_CERTIFICATE_BASE64` | macOS | Developer ID Application `.p12` (base64) |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS | Certificate password |
+| `APPLE_ID` | macOS | Apple ID for notarization |
+| `APPLE_APP_SPECIFIC_PASSWORD` | macOS | App-specific password |
+| `APPLE_TEAM_ID` | macOS | Team ID |
+| `WINDOWS_CERTIFICATE_BASE64` | Windows | Code signing `.pfx` (base64) |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Windows | Certificate password |
+
+Then update `package.json` `"build"` mac/win signing options and the workflow to import certificates before `electron-builder` runs.
+
+Installers currently build **unsigned** (`forceCodeSigning: false`, `identity: null`).

@@ -14,6 +14,9 @@
     "login-naukri": "tsx src/scripts/login-naukri.ts",
     "desktop": "electron .",
     "prepare:bundle": "node scripts/prepare-agent-bundle.mjs",
+    "dist": "node scripts/build-installers.mjs",
+    "dist:win": "node scripts/build-installers.mjs --win",
+    "dist:mac": "node scripts/build-installers.mjs --mac",
     "build:installers": "node scripts/build-installers.mjs",
     "build:dmg": "node scripts/build-installers.mjs --mac",
     "build:exe": "node scripts/build-installers.mjs --win",
@@ -40,6 +43,7 @@
   "build": {
     "appId": "ventures.perfect.fetch-agent",
     "productName": "Perfect Ventures Fetch Agent",
+    "forceCodeSigning": false,
     "directories": {
       "output": "recruiter/installers",
       "buildResources": "desktop/build"
@@ -57,10 +61,13 @@
     ],
     "mac": {
       "target": ["dmg"],
-      "category": "public.app-category.business"
+      "category": "public.app-category.business",
+      "identity": null,
+      "gatekeeperAssess": false
     },
     "win": {
-      "target": ["nsis"]
+      "target": ["nsis"],
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
