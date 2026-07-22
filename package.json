@@ -1,0 +1,77 @@
+{
+  "name": "@perfect-ventures/fetch-agent",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Perfect Ventures",
+  "description": "Local desktop fetch agent for Instahyre and Naukri (polls Supabase fetch_jobs)",
+  "main": "desktop/main.cjs",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "setup": "node scripts/setup.mjs",
+    "install:agent": "node scripts/first-run.mjs",
+    "login-instahyre": "tsx src/scripts/login-instahyre.ts",
+    "login-naukri": "tsx src/scripts/login-naukri.ts",
+    "desktop": "electron .",
+    "prepare:bundle": "node scripts/prepare-agent-bundle.mjs",
+    "build:installers": "node scripts/build-installers.mjs",
+    "build:dmg": "node scripts/build-installers.mjs --mac",
+    "build:exe": "node scripts/build-installers.mjs --win",
+    "package:release": "node scripts/build-package.mjs",
+    "package:recruiter": "node scripts/build-package.mjs",
+    "fix:mac": "node scripts/fix-mac-launchers.mjs",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "npm --prefix naukri-bulk-download install && npm --prefix instahyre-bulk-download install && npm --prefix naukri-bulk-download run postinstall && npm --prefix instahyre-bulk-download run postinstall"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "dotenv": "^16.4.7",
+    "fs-extra": "^11.2.0",
+    "playwright": "^1.49.1",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^22.10.2",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2"
+  },
+  "build": {
+    "appId": "ventures.perfect.fetch-agent",
+    "productName": "Perfect Ventures Fetch Agent",
+    "directories": {
+      "output": "recruiter/installers",
+      "buildResources": "desktop/build"
+    },
+    "files": [
+      "desktop/**/*",
+      "!desktop/build/.gitkeep"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/agent-bundle",
+        "to": "agent",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.business"
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": ["en_US"]
+    },
+    "dmg": {
+      "title": "Perfect Ventures Fetch Agent ${version}"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+sessions/storageState.json
+sessions/*.har
+sessions/screenshots/
+sessions/downloads/
+google-service-account*.json
+client_secret*.json
+sessions/google-oauth-token.json
+sessions/debug/
+logs/
+*.log
