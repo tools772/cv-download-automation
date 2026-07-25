@@ -34,7 +34,7 @@ export async function uploadLocalResumeToDrive(
     throw new Error(`Not a file: ${resolved}`);
   }
 
-  const fileName = path.basename(resolved);
+  const fileName = driveResumeFileName(path.basename(resolved));
   logger.info('Uploading local resume to Google Drive', {
     rank,
     localPath: resolved,
@@ -51,4 +51,9 @@ export async function uploadLocalResumeToDrive(
   });
 
   return driveFile;
+}
+
+/** Strip rank prefix so Drive dedupes "01-Rohith-B.pdf" and "02-Rohith-B.pdf" as the same person. */
+function driveResumeFileName(localBaseName: string): string {
+  return localBaseName.replace(/^\d+[-_]\s*/, '') || localBaseName;
 }

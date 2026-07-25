@@ -9,10 +9,17 @@ import {
 } from './downloadPageBatch.js';
 import { goToNextCandidatesPage } from './pagination.js';
 import { unzipAndUploadAllBatches } from './uploadPageBatchToDrive.js';
+import { applyHideViewedByMeFilter } from './applyCandidateFilters.js';
 import { isDriveUploadEnabled } from '../drive/uploadAfterDownload.js';
 import { ensureSessionDir, getStorageStatePath, sessionExists } from '../session/storage.js';
 import { logger } from '../utils/logger.js';
 import { delay } from '../utils/delay.js';
+import {
+  formatMissingCandidatesUrl,
+  formatPageBatchFailed,
+  isBrowserClosedMessage,
+  printInstahyreError,
+} from './userErrors.js';
 
 export interface InstahyreDownloadSummary {
   batches: PageBatchResult[];
@@ -24,10 +31,7 @@ export interface InstahyreDownloadSummary {
 }
 
 function isBrowserClosedError(message: string | undefined): boolean {
-  return Boolean(
-    message &&
-      /target page, context or browser has been closed|browser tab closed/i.test(message),
-  );
+  return Boolean(message && isBrowserClosedMessage(message));
 }
 
 async function openDownloadSession(
@@ -37,6 +41,7 @@ async function openDownloadSession(
   const launched = await launchBrowser(config, { storageStatePath });
   const page = await createPage(launched.context);
   await openCandidatesPage(page, config);
+  await applyHideViewedByMeFilter(page, config.sessionValidateTimeoutMs);
   const resultsTotal = await parseResultsTotal(page);
   return { launched, page, resultsTotal };
 }
@@ -49,9 +54,15 @@ async function openDownloadSession(
 export async function downloadInstahyreCvs(
   config: InstahyreConfig,
 ): Promise<InstahyreDownloadSummary> {
-  if (!config.instahyreCandidatesUrl) {
-    throw new Error('Missing INSTAHYRE_CANDIDATES_URL in .env');
+  const candidatesUrl = config.instahyreCandidatesUrl?.trim();
+  if (!candidatesUrl) {
+    throw new Error(formatMissingCandidatesUrl());
   }
+
+  console.log(`\nInstahyre fetch URL: ${candidatesUrl}`);
+  console.log(
+    'Important: Leave the Chromium window open until this run finishes — closing it stops the download.\n',
+  );
 
   await ensureSessionDir(config);
   await fs.ensureDir(config.localSaveDir);
@@ -72,6 +83,7 @@ export async function downloadInstahyreCvs(
   try {
     let page = await createPage(launched.context);
     await openCandidatesPage(page, config);
+    await applyHideViewedByMeFilter(page, config.sessionValidateTimeoutMs);
     resultsTotal = await parseResultsTotal(page);
 
     logger.info('Starting Instahyre page-wise download', {
@@ -117,7 +129,9 @@ export async function downloadInstahyreCvs(
           `[page ${pageNumber}] status=downloaded | count=${batch.resumeCount} | local=${batch.localPath}`,
         );
       } else {
-        console.log(`[page ${pageNumber}] status=failed | ${batch.error}`);
+        const userMsg = formatPageBatchFailed(pageNumber, batch.error ?? 'Unknown error');
+        printInstahyreError(userMsg);
+        console.log(`[page ${pageNumber}] status=failed | ${userMsg}`);
         break;
       }
 
@@ -143,7 +157,11 @@ export async function downloadInstahyreCvs(
   if (isDriveUploadEnabled(config) && batches.some((batch) => batch.status === 'downloaded')) {
     console.log('\nAll pages downloaded. Starting Drive upload...');
     try {
-      const uploadResult = await unzipAndUploadAllBatches(config, batches);
+      const uploadResult = await unzipAndUploadAllBatches(
+        config,
+        batches,
+        config.downloadLimit,
+      );
       if (uploadResult) {
         totalUploadedToDrive = uploadResult.totalUploadedToDrive;
         driveUploadFailed = uploadResult.driveUploadFailed;

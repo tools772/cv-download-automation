@@ -28,6 +28,7 @@ export async function launchBrowser(
   const headless = options.headless ?? config.headless;
 
   logger.info('Launching browser for Instahyre', { headless });
+  console.log('Opening Instahyre in Chromium — do not close this window until the download completes.');
 
   const launchOpts = {
     headless,
@@ -49,6 +50,12 @@ export async function launchBrowser(
     storageState: options.storageStatePath,
   });
 
+  // tsx/esbuild `keepNames` injects `__name(...)` wrappers into evaluate callbacks.
+  // Define the helper on every page so serialized callbacks don't throw ReferenceError.
+  await context.addInitScript(
+    'window.__name = window.__name || function (f) { return f; };',
+  );
+
   context.on('close', () => {
     logger.warn('Browser context closed');
   });
@@ -67,6 +74,9 @@ export async function createPage(
   const page = await context.newPage();
   page.on('close', () => {
     logger.warn('Browser tab closed unexpectedly');
+    console.warn(
+      'INSTAHYRE WARNING: Automation browser tab was closed. Download will fail if still in progress.',
+    );
   });
   page.on('crash', () => {
     logger.error('Browser tab crashed');

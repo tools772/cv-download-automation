@@ -1,6 +1,7 @@
-import path from "node:path";
+import fs from "fs-extra";
 import { chromium } from "playwright";
 import { ensurePerfectVenturesDir, getNaukriSessionPath } from "../storage/session.js";
+import { naukriChromeProfileDir } from "../config.js";
 
 const NAUKRI_LOGIN = "https://www.naukri.com/recruit/login";
 const RESDEX_HOME = "https://resdex.naukri.com/v3/";
@@ -21,18 +22,26 @@ function isLoggedIn(url: string): boolean {
 }
 
 /**
- * Launch headed Chrome, wait for manual Naukri Recruiter login, save session under ~/PerfectVentures.
+ * Launch headed Chrome with a persistent profile, wait for manual login, save backup storage state.
  */
 export async function connectNaukri(startUrl?: string): Promise<void> {
   await ensurePerfectVenturesDir();
+  await fs.ensureDir(naukriChromeProfileDir);
 
-  const browser = await chromium.launch({ headless: false, channel: "chrome" });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  const context = await chromium.launchPersistentContext(naukriChromeProfileDir, {
+    headless: false,
+    channel: "chrome",
+    acceptDownloads: true,
+    locale: "en-IN",
+    timezoneId: "Asia/Kolkata",
+  });
 
+  const page = context.pages()[0] ?? (await context.newPage());
   const url = startUrl?.trim() || NAUKRI_LOGIN;
+
   console.log("\n=== Naukri manual login ===");
   console.log("Sign in to Naukri Recruiter in the Chrome window that opened.");
+  console.log(`Profile: ${naukriChromeProfileDir}`);
   console.log(`Opening: ${url}\n`);
 
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120_000 });
@@ -44,7 +53,6 @@ export async function connectNaukri(startUrl?: string): Promise<void> {
     const bodyText = await page.locator("body").innerText().catch(() => "");
 
     if (isLoggedIn(currentUrl) && !isLoginLikePage(currentUrl, bodyText)) {
-      // Optional: open Resdex once to ensure recruiter session covers CV download
       if (!/resdex\.naukri\.com/i.test(currentUrl)) {
         await page.goto(RESDEX_HOME, { waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => undefined);
         await new Promise((r) => setTimeout(r, 2000));
@@ -52,21 +60,22 @@ export async function connectNaukri(startUrl?: string): Promise<void> {
 
       const statePath = getNaukriSessionPath();
       await context.storageState({ path: statePath });
-      console.log(`Session saved: ${statePath}`);
-      await browser.close();
+      console.log(`Login saved to Chrome profile: ${naukriChromeProfileDir}`);
+      console.log(`Backup session: ${statePath}`);
+      await context.close();
       return;
     }
 
     await new Promise((r) => setTimeout(r, 1000));
   }
 
-  await browser.close();
+  await context.close();
   throw new Error(`Naukri login timed out after ${LOGIN_TIMEOUT_MS / 1000}s`);
 }
 
 export function getNaukriSessionConfig(): { sessionDir: string; storageStateFile: string } {
   return {
-    sessionDir: path.dirname(getNaukriSessionPath()),
-    storageStateFile: path.basename(getNaukriSessionPath()),
+    sessionDir: naukriChromeProfileDir,
+    storageStateFile: "Default",
   };
 }

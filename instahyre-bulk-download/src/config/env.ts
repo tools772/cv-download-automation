@@ -9,8 +9,28 @@ export const projectRoot = path.resolve(__dirname, '../..');
 /** ats-perfect-ventures/ — shared .env */
 const repoRoot = path.resolve(projectRoot, '..');
 
+/** Values injected by fetch agent spawn — must survive dotenv and beat .env files. */
+const JOB_INJECTED_ENV_KEYS = [
+  'INSTAHYRE_CANDIDATES_URL',
+  'INSTAHYRE_SEARCH_URL',
+  'RESDEX_SAVED_SEARCH_URL',
+  'DOWNLOAD_LIMIT',
+  'GOOGLE_DRIVE_FOLDER_ID',
+  'GOOGLE_DRIVE_ACCESS_TOKEN',
+] as const;
+
+function captureJobInjectedEnv(): Record<string, string> {
+  const captured: Record<string, string> = {};
+  for (const key of JOB_INJECTED_ENV_KEYS) {
+    const value = process.env[key]?.trim();
+    if (value) captured[key] = value;
+  }
+  return captured;
+}
+
 /** Values set before this module loads (e.g. fetch-cvs-server spawn) must beat .env files. */
 const preservedEnv = { ...process.env };
+const jobInjectedEnv = captureJobInjectedEnv();
 
 dotenv.config({ path: path.join(repoRoot, '.env') });
 dotenv.config({ path: path.join(repoRoot, '.env.local'), override: true });
@@ -19,6 +39,11 @@ for (const [key, value] of Object.entries(preservedEnv)) {
   if (value !== undefined) {
     process.env[key] = value;
   }
+}
+
+// Explicitly restore portal/job URLs after dotenv (parent .env must not override fetch input).
+for (const [key, value] of Object.entries(jobInjectedEnv)) {
+  process.env[key] = value;
 }
 
 function parseBool(value: string | undefined, defaultValue: boolean): boolean {
@@ -82,9 +107,9 @@ export function loadConfig(overrides: Partial<InstahyreConfig> = {}): InstahyreC
       process.env.INSTAHYRE_CANDIDATES_URL?.trim() ||
       process.env.INSTAHYRE_SEARCH_URL?.trim() ||
       undefined,
-    downloadLimit: Math.max(
-      1,
-      Number.parseInt(process.env.DOWNLOAD_LIMIT ?? '10', 10) || 10,
+    downloadLimit: Math.min(
+      50,
+      Math.max(1, Number.parseInt(process.env.DOWNLOAD_LIMIT ?? '10', 10) || 10),
     ),
     uploadToDriveAfterDownload: parseBool(
       process.env.UPLOAD_TO_DRIVE_AFTER_DOWNLOAD,

@@ -3,6 +3,13 @@ import { CANDIDATE_LIST } from './selectors.js';
 import { dismissPromotionalModals } from './dismissPopups.js';
 import { delay } from '../utils/delay.js';
 
+function formatCandidateListTimeout(url: string): string {
+  return (
+    `Candidate list did not load within timeout (${url}). ` +
+    'Check the candidates URL from Caliber, or re-run: npm run login-instahyre'
+  );
+}
+
 function isLoginLikePage(url: string, bodyText: string): boolean {
   if (/login|signin|sign-in/i.test(url)) return true;
   return /log\s*in to instahyre|sign in to continue|enter your email/i.test(bodyText);
@@ -77,9 +84,5 @@ export async function waitForCandidateListReady(
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 200);
-  throw new Error(
-    `Candidate list did not load within ${timeoutMs}ms (${url}). ` +
-      'Check INSTAHYRE_CANDIDATES_URL points to the employer candidates list, or re-run login.' +
-      (snippet ? ` Page snippet: ${snippet}` : ''),
-  );
+  throw new Error(formatCandidateListTimeout(url) + (snippet ? ` Page snippet: ${snippet}` : ''));
 }

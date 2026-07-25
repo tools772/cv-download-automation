@@ -19,10 +19,20 @@ interface ExtractedResume {
   pageNumber: number;
 }
 
-/** Extract all downloaded page zips, then upload every resume to Drive. */
+function resumeIdentityKey(filePath: string): string {
+  return path.basename(filePath).trim().toLowerCase();
+}
+
+/**
+ * Extract downloaded page zips, then upload resumes to Drive.
+ * Caps uploads to `maxUploads` (download limit) and skips duplicate filenames
+ * within the same fetch — Instahyre zip downloads often include more PDFs than
+ * were selected.
+ */
 export async function unzipAndUploadAllBatches(
   config: InstahyreConfig,
   batches: PageBatchResult[],
+  maxUploads?: number,
 ): Promise<AllBatchesUploadResult | null> {
   if (!isDriveUploadEnabled(config)) {
     return null;
@@ -35,12 +45,21 @@ export async function unzipAndUploadAllBatches(
     return { totalUploadedToDrive: 0, driveUploadFailed: 0 };
   }
 
+  const uploadCap =
+    typeof maxUploads === 'number' && maxUploads > 0
+      ? maxUploads
+      : Number.POSITIVE_INFINITY;
+
   console.log(`\nExtracting ${downloaded.length} page batch(es)...`);
 
   const extractRootDir = path.join(config.localSaveDir, 'extracted');
   const allResumeFiles: ExtractedResume[] = [];
+  const seenNames = new Set<string>();
+  let skippedDuplicates = 0;
 
   for (const batch of downloaded) {
+    if (allResumeFiles.length >= uploadCap) break;
+
     const stat = await fs.stat(batch.localPath!);
     let resumeFiles: string[];
 
@@ -57,14 +76,47 @@ export async function unzipAndUploadAllBatches(
       throw new Error(`No resume files found in batch: ${batch.localPath}`);
     }
 
+    let kept = 0;
     for (const filePath of resumeFiles) {
+      if (allResumeFiles.length >= uploadCap) break;
+      const key = resumeIdentityKey(filePath);
+      if (seenNames.has(key)) {
+        skippedDuplicates += 1;
+        continue;
+      }
+      seenNames.add(key);
       allResumeFiles.push({ filePath, pageNumber: batch.pageNumber });
+      kept += 1;
     }
 
-    console.log(`[page ${batch.pageNumber}] extracted ${resumeFiles.length} resumes`);
+    console.log(
+      `[page ${batch.pageNumber}] extracted ${resumeFiles.length} resumes` +
+        (kept !== resumeFiles.length ? ` (kept ${kept} unique/within limit)` : ''),
+    );
   }
 
-  console.log(`\nUploading ${allResumeFiles.length} resumes to Drive...`);
+  if (skippedDuplicates > 0) {
+    logger.info('Skipped duplicate resume filenames within fetch', {
+      skippedDuplicates,
+    });
+    console.log(`Skipped ${skippedDuplicates} duplicate filename(s) in zip`);
+  }
+
+  if (
+    Number.isFinite(uploadCap) &&
+    allResumeFiles.length < (batches.reduce((n, b) => n + (b.resumeCount || 0), 0) || 0)
+  ) {
+    logger.info('Capping Instahyre uploads to requested limit', {
+      uploadCap,
+      queued: allResumeFiles.length,
+    });
+  }
+
+  console.log(
+    `\nUploading ${allResumeFiles.length} resumes to Drive` +
+      (Number.isFinite(uploadCap) ? ` (cap ${uploadCap})` : '') +
+      '...',
+  );
 
   let totalUploadedToDrive = 0;
   let driveUploadFailed = 0;

@@ -5,6 +5,7 @@ import { dismissPromotionalModals } from '../instahyre/dismissPopups.js';
 import { logger } from '../utils/logger.js';
 import { saveStorageState, sessionExists } from '../session/storage.js';
 import { waitForCandidateListReady } from '../instahyre/waitForCandidateList.js';
+import { formatBrowserClosedError } from '../instahyre/userErrors.js';
 import { waitForManualInstahyreLogin } from './manualLogin.js';
 
 function isLoginPage(url: string): boolean {
@@ -77,22 +78,28 @@ async function gotoLoginAndSignIn(page: Page, config: InstahyreConfig): Promise<
 }
 
 export async function openCandidatesPage(page: Page, config: InstahyreConfig): Promise<void> {
-  const url = config.instahyreCandidatesUrl!;
+  const url = config.instahyreCandidatesUrl?.trim();
+  if (!url) {
+    throw new Error(
+      'Missing Instahyre candidates URL. Paste the URL in Caliber Upload Resumes — do not rely on INSTAHYRE_CANDIDATES_URL in .env.',
+    );
+  }
+
+  console.log(`Opening Instahyre candidates URL: ${url}`);
+  logger.info('Opening Instahyre candidates page', { url });
+
+  const expectedJobMatch = url.match(/\/employer\/candidates\/(\d+)\/\d+/i);
+  const expectedJobId = expectedJobMatch?.[1];
 
   if (!(await sessionExists(config))) {
     await gotoLoginAndSignIn(page, config);
   }
 
-  await page.goto(url, {
-    waitUntil: 'domcontentloaded',
-    timeout: config.sessionValidateTimeoutMs,
-  });
-  await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => undefined);
+  await gotoCandidatesUrl(page, url, config.sessionValidateTimeoutMs);
 
   if (isLoginPage(page.url())) {
     await gotoLoginAndSignIn(page, config);
-    await page.goto(url, { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => undefined);
+    await gotoCandidatesUrl(page, url, config.sessionValidateTimeoutMs);
   }
 
   if (isLoginPage(page.url())) {
@@ -101,6 +108,15 @@ export async function openCandidatesPage(page: Page, config: InstahyreConfig): P
         ? 'Still on Instahyre login page. Complete sign-in in the browser window and try again.'
         : 'Still on login page after sign-in. Check INSTAHYRE_EMAIL / INSTAHYRE_PASSWORD.',
     );
+  }
+
+  if (expectedJobId && !page.url().includes(`/candidates/${expectedJobId}/`)) {
+    logger.warn('Instahyre opened a different job — forcing requested URL', {
+      requested: url,
+      actual: page.url(),
+    });
+    console.log(`Instahyre redirected to ${page.url()} — navigating to requested job ${expectedJobId}`);
+    await gotoCandidatesUrl(page, url, config.sessionValidateTimeoutMs);
   }
 
   await dismissPromotionalModals(page);
@@ -120,10 +136,28 @@ export async function openCandidatesPage(page: Page, config: InstahyreConfig): P
 
   logger.info('Instahyre session invalid or stale — re-authenticating');
   await gotoLoginAndSignIn(page, config);
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => undefined);
+  await gotoCandidatesUrl(page, url, config.sessionValidateTimeoutMs);
   await dismissPromotionalModals(page);
   await waitForCandidateListReady(page, config.sessionValidateTimeoutMs);
+}
+
+async function gotoCandidatesUrl(page: Page, url: string, timeoutMs: number): Promise<void> {
+  if (page.isClosed()) {
+    throw new Error(formatBrowserClosedError('navigation'));
+  }
+  try {
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: timeoutMs,
+    });
+    await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => undefined);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/target page, context or browser has been closed/i.test(message)) {
+      throw new Error(formatBrowserClosedError('opening candidates page'));
+    }
+    throw error;
+  }
 }
 
 /** Standalone: open browser, wait for manual login, save session, exit. */

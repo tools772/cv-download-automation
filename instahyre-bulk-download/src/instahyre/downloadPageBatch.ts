@@ -3,10 +3,12 @@ import type { Locator, Page } from 'playwright';
 import type { InstahyreConfig } from '../types/index.js';
 import { CANDIDATE_LIST, DOWNLOAD_MODAL } from './selectors.js';
 import { dismissPromotionalModals } from './dismissPopups.js';
+import { ensureFilterPanelClosed } from './applyCandidateFilters.js';
 import { INSTAHYRE_PAGE_SIZE, prepareForPagination } from './pagination.js';
 import { waitForCandidateListReady } from './waitForCandidateList.js';
 import { logger } from '../utils/logger.js';
 import { delay } from '../utils/delay.js';
+import { formatBrowserClosedError } from './userErrors.js';
 import { downloadProfilesOnPage } from './downloadProfileResume.js';
 
 export interface PageBatchResult {
@@ -75,11 +77,7 @@ function isPageClosedError(error: unknown): boolean {
 
 function assertPageOpen(page: Page, step: string): void {
   if (page.isClosed()) {
-    throw new Error(
-      `Browser tab closed during ${step}. ` +
-        'If a Chrome window opened, leave it open until the download finishes. ' +
-        'For unattended runs, set HEADLESS=true or FETCH_CVS_HEADLESS=true in .env.local.',
-    );
+    throw new Error(formatBrowserClosedError(step));
   }
 }
 
@@ -270,8 +268,44 @@ async function selectIndividualCandidates(page: Page, count: number): Promise<nu
   return toSelect;
 }
 
+/** Uncheck extras so exactly `count` profile checkboxes remain selected. */
+async function ensureExactSelectionCount(page: Page, count: number): Promise<number> {
+  const profileCheckboxes = await getProfileCheckboxLocators(page);
+  const checked: Locator[] = [];
+  for (const checkbox of profileCheckboxes) {
+    if (await checkbox.isChecked().catch(() => false)) {
+      checked.push(checkbox);
+    }
+  }
+
+  if (checked.length <= count) return checked.length;
+
+  let toUncheck = checked.length - count;
+  for (let i = checked.length - 1; i >= 0 && toUncheck > 0; i--) {
+    const checkbox = checked[i]!;
+    await checkbox.uncheck({ timeout: 5000 }).catch(async () => {
+      await checkbox.click({ timeout: 5000 }).catch(() => undefined);
+    });
+    if (!(await checkbox.isChecked().catch(() => true))) {
+      toUncheck--;
+    }
+  }
+
+  let selected = 0;
+  for (const checkbox of profileCheckboxes) {
+    if (await checkbox.isChecked().catch(() => false)) selected++;
+  }
+  logger.info('Trimmed Instahyre selection to requested count', {
+    requested: count,
+    before: checked.length,
+    after: selected,
+  });
+  return selected;
+}
+
 async function selectCandidatesForBatch(page: Page, selectCount: number): Promise<number> {
   await prepareForPagination(page);
+  await ensureFilterPanelClosed(page);
 
   if (selectCount >= INSTAHYRE_PAGE_SIZE) {
     try {
@@ -285,19 +319,20 @@ async function selectCandidatesForBatch(page: Page, selectCount: number): Promis
     }
   }
 
+  // For small limits, pick N checkboxes directly — avoids select-all-then-uncheck flicker.
   try {
-    const selected = await selectPartialCandidates(page, selectCount);
-    logger.info('Selected candidates for partial page download', {
+    const selected = await selectIndividualCandidates(page, selectCount);
+    logger.info('Selected individual candidates for partial page download', {
       requested: selectCount,
       selected,
     });
     return selected;
   } catch (error) {
-    logger.warn('Select-all trim failed; falling back to individual checkboxes', {
+    logger.warn('Individual select failed; trying select-all trim', {
       error: error instanceof Error ? error.message : String(error),
     });
-    const selected = await selectIndividualCandidates(page, selectCount);
-    logger.info('Selected individual candidates for partial page download', {
+    const selected = await selectPartialCandidates(page, selectCount);
+    logger.info('Selected candidates for partial page download', {
       requested: selectCount,
       selected,
     });
@@ -349,6 +384,17 @@ export async function downloadCurrentPageBatch(
 
     const expectedCount = await selectCandidatesForBatch(page, selectCount);
     await delay(500);
+
+    // Instahyre sometimes leaves extra boxes checked (or zip includes more than
+    // selected). Trim selection down to the requested count before downloading.
+    const trimmed = await ensureExactSelectionCount(page, expectedCount);
+    if (trimmed !== expectedCount) {
+      logger.warn('Could not trim selection to exact count', {
+        expectedCount,
+        trimmed,
+        pageNumber,
+      });
+    }
 
     if (!(await clickFirst(page, CANDIDATE_LIST.downloadResumes))) {
       throw new Error('Could not find "Download resumes" button');

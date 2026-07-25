@@ -23,9 +23,10 @@ export async function createSessionManager(
   config: AppConfig,
 ): Promise<SessionManager> {
   let launched = await launchBrowser(config, {
-    storageStatePath: (await sessionExists(config))
-      ? getStorageStatePath(config)
-      : undefined,
+    storageStatePath:
+      !config.manualResdexLogin && (await sessionExists(config))
+        ? getStorageStatePath(config)
+        : undefined,
   });
 
   let context = launched.context;
@@ -37,12 +38,9 @@ export async function createSessionManager(
   const getContext = (): BrowserContext => context;
 
   const refreshSession = async (): Promise<BrowserContext> => {
-    const manualOnly =
-      config.manualResdexLogin || !config.username.trim() || !config.password.trim();
-    if (manualOnly) {
-      throw new Error(
-        'Naukri session expired or missing. Run: npm run login-naukri (manual login required)',
-      );
+    if (config.manualResdexLogin) {
+      logger.info('Manual Resdex mode — assuming Naukri is already logged in');
+      return context;
     }
 
     logger.info('Refreshing session via browser login');
@@ -66,6 +64,11 @@ export async function createSessionManager(
   };
 
   const ensureAuthenticated = async (): Promise<BrowserContext> => {
+    if (config.manualResdexLogin) {
+      logger.info('Assuming Naukri is logged in — skipping session validation');
+      return context;
+    }
+
     const exists = await sessionExists(config);
 
     if (exists) {

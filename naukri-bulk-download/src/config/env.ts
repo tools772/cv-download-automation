@@ -20,8 +20,26 @@ const repoRoot = path.resolve(projectRoot, '..');
 
 
 
+/** Job-injected vars from fetch agent spawn — must beat .env files. */
+const JOB_INJECTED_ENV_KEYS = [
+  'RESDEX_SAVED_SEARCH_URL',
+  'DOWNLOAD_LIMIT',
+  'GOOGLE_DRIVE_FOLDER_ID',
+  'GOOGLE_DRIVE_ACCESS_TOKEN',
+] as const;
+
+function captureJobInjectedEnv(): Record<string, string> {
+  const captured: Record<string, string> = {};
+  for (const key of JOB_INJECTED_ENV_KEYS) {
+    const value = process.env[key]?.trim();
+    if (value) captured[key] = value;
+  }
+  return captured;
+}
+
 /** Values set before this module loads (e.g. fetch-cvs-server spawn) must beat .env files. */
 const preservedEnv = { ...process.env };
+const jobInjectedEnv = captureJobInjectedEnv();
 
 dotenv.config({ path: path.join(repoRoot, '.env') });
 dotenv.config({ path: path.join(repoRoot, '.env.local'), override: true });
@@ -30,6 +48,10 @@ for (const [key, value] of Object.entries(preservedEnv)) {
   if (value !== undefined) {
     process.env[key] = value;
   }
+}
+
+for (const [key, value] of Object.entries(jobInjectedEnv)) {
+  process.env[key] = value;
 }
 
 
@@ -122,13 +144,17 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 
       process.env.RESDEX_SAVED_SEARCH_URL?.trim() || undefined,
 
-    downloadLimit: Math.max(
+    downloadLimit: Math.min(
+
+      50,
+
+      Math.max(
 
       1,
 
       Number.parseInt(process.env.DOWNLOAD_LIMIT ?? '10', 10) || 10,
 
-    ),
+    )),
 
     downloadStartRank: parseInt(process.env.DOWNLOAD_START_RANK ?? '1', 10),
 

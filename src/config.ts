@@ -30,6 +30,7 @@ export const perfectVenturesHome = path.join(os.homedir(), "PerfectVentures");
 
 export const instahyreSessionPath = path.join(perfectVenturesHome, "storageState.json");
 export const naukriSessionPath = path.join(perfectVenturesHome, "naukri-storage-state.json");
+export const naukriChromeProfileDir = path.join(perfectVenturesHome, "naukri-chrome-profile");
 export const localDownloadsDir = path.join(perfectVenturesHome, "downloads");
 
 export const naukriBulkDir = path.join(agentRoot, "naukri-bulk-download");

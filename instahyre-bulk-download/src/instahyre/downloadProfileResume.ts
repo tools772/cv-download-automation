@@ -70,10 +70,14 @@ export async function downloadProfilesOnPage(
   await fs.ensureDir(batchDir);
 
   const savedFiles: string[] = [];
-  const viewProfileLinks = page.getByRole('link', { name: /View profile/i });
+  const viewProfileLinks = page.locator('a, button, [role="button"]').filter({
+    hasText: /^View profile$/i,
+  });
   const available = await viewProfileLinks.count();
   if (available === 0) {
-    throw new Error('No "View profile" links found on this candidate page.');
+    throw new Error(
+      'No "View profile" controls on this page — the candidate list may still be loading, or the URL may not be a job Candidates tab.',
+    );
   }
 
   const toDownload = Math.min(count, available);

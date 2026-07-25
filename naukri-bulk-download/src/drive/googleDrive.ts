@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'fs-extra';
 import type { AppConfig } from '../types/index.js';
 import { getOAuthAccessToken } from './googleOAuth.js';
+import { logger } from '../utils/logger.js';
 
 interface ServiceAccountCredentials {
   client_email: string;
@@ -111,6 +112,32 @@ function guessMimeType(fileName: string): string {
   return 'application/octet-stream';
 }
 
+async function findFileInFolderByName(
+  accessToken: string,
+  folderId: string,
+  fileName: string,
+): Promise<DriveUploadResult | null> {
+  const escaped = fileName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const q = encodeURIComponent(
+    `name='${escaped}' and '${folderId}' in parents and trashed=false`,
+  );
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,webViewLink,webContentLink)&pageSize=1`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+  const data = (await response.json()) as {
+    files?: DriveUploadResult[];
+    error?: { message?: string };
+  };
+  if (!response.ok) {
+    // Non-fatal — fall through to upload
+    return null;
+  }
+  return data.files?.[0] ?? null;
+}
+
 export async function uploadFileToDrive(
   config: AppConfig,
   filePath: string,
@@ -121,6 +148,21 @@ export async function uploadFileToDrive(
   }
 
   const accessToken = await getAccessToken(config);
+
+  // Skip re-upload when the folder already has this resume (same name).
+  const existing = await findFileInFolderByName(
+    accessToken,
+    config.googleDriveFolderId,
+    fileName,
+  );
+  if (existing?.id) {
+    logger.info('Drive file already exists — skipping re-upload', {
+      fileName,
+      driveFileId: existing.id,
+    });
+    return existing;
+  }
+
   const fileBuffer = await fs.readFile(filePath);
   const mimeType = guessMimeType(fileName);
   const boundary = `pv-${crypto.randomUUID()}`;

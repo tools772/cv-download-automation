@@ -13,6 +13,7 @@ async function main(): Promise<void> {
   const results = await downloadTopResdexResumes(config);
   const uploaded = results.filter((r) => r.status === 'uploaded').length;
   const clicked = results.filter((r) => r.status === 'clicked').length;
+  const skipped = results.filter((r) => r.status === 'skipped').length;
   const failed = results.filter((r) => r.status === 'failed').length;
   const ok = uploaded + clicked;
 
@@ -23,7 +24,14 @@ async function main(): Promise<void> {
       : undefined,
   });
 
-  process.exit(failed === 0 && ok > 0 ? 0 : failed > 0 ? 1 : 0);
+  // Skipped profiles (no CV attached) are not job failures.
+  if (failed > 0) {
+    process.exit(1);
+  }
+  if (ok > 0 || skipped > 0) {
+    process.exit(0);
+  }
+  process.exit(1);
 }
 
 main().catch((error) => {

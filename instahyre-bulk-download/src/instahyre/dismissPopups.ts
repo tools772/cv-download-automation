@@ -2,8 +2,38 @@ import type { Page } from 'playwright';
 import { logger } from '../utils/logger.js';
 import { delay } from '../utils/delay.js';
 
+/** Crisp chat bubble covers Apply / checkboxes on the candidate list. */
+export async function dismissCrispChatWidget(page: Page): Promise<void> {
+  const crisp = page.locator('.crisp-client').first();
+  if (!(await crisp.isVisible({ timeout: 500 }).catch(() => false))) {
+    return;
+  }
+
+  const minimize = page
+    .locator('.crisp-client [aria-label*="minimize" i], .crisp-client [aria-label*="close" i]')
+    .first();
+  if (await minimize.isVisible({ timeout: 500 }).catch(() => false)) {
+    await minimize.click({ timeout: 2000, force: true }).catch(() => undefined);
+    await delay(300);
+  }
+
+  if (await crisp.isVisible().catch(() => false)) {
+    await page
+      .evaluate(() => {
+        for (const el of document.querySelectorAll('.crisp-client, .cc-1gfkz, .cc-1er0q')) {
+          const node = el as HTMLElement;
+          node.style.pointerEvents = 'none';
+          node.style.visibility = 'hidden';
+        }
+      })
+      .catch(() => undefined);
+  }
+}
+
 /** Optional popups that block the candidate list — dismiss if present. */
 export async function dismissPromotionalModals(page: Page): Promise<void> {
+  await dismissCrispChatWidget(page);
+
   const dismissButtons = [
     /^Not now$/i,
     /^Skip$/i,

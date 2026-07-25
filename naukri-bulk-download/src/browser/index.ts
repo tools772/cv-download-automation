@@ -1,4 +1,4 @@
-export { launchBrowser, createPage } from './launcher.js';
+export { launchBrowser, createPage, closeExtraPages } from './launcher.js';
 export {
   applyAntiDetection,
   pickUserAgent,

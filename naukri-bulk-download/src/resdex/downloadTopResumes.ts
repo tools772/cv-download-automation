@@ -1,9 +1,10 @@
+import os from 'node:os';
 import path from 'node:path';
 import fs from 'fs-extra';
-import type { BrowserContext, Frame, Page } from 'playwright';
+import type { BrowserContext, Download, Frame, Locator, Page } from 'playwright';
 import type { AppConfig } from '../types/index.js';
 import { createSessionManager } from '../session/manager.js';
-import { createPage } from '../browser/launcher.js';
+import { createPage, closeExtraPages } from '../browser/launcher.js';
 import {
   logManualSaveResult,
   watchAfterDownloadClick,
@@ -19,15 +20,30 @@ import {
   NoAttachedCvError,
 } from './detectAttachedCv.js';
 import { RESUME_DOWNLOAD_TIMEOUT_MS } from './constants.js';
+import { applyResdexSearchFilters, withActiveInDays } from './applyResdexFilters.js';
 import { printProfileStatus } from '../utils/runOutput.js';
 import { delay, randomDelay } from '../utils/delay.js';
 import { logger } from '../utils/logger.js';
+import { createDownloadedProfilesHistory, normalizeCandidateName } from '../storage/downloadedProfiles.js';
 
 /** Returned when we only click Download CV and let the browser handle Save As. */
 export const MANUAL_CLICK_SENTINEL = '__manual_download_click__';
 
 export function isManualClickResult(value: string): boolean {
   return value === MANUAL_CLICK_SENTINEL;
+}
+
+function parseBool(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined || value.trim() === '') return defaultValue;
+  return ['true', '1', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+/** A profile counts as a real download when a resume file was actually saved/uploaded. */
+function isSuccessfulDownload(result: ResdexResumeDownloadResult): boolean {
+  return (
+    result.status === 'uploaded' ||
+    (result.status === 'clicked' && Boolean(result.localPath))
+  );
 }
 
 export interface ResdexResumeDownloadResult {
@@ -113,25 +129,10 @@ const ATTACHED_CV_DOWNLOAD_SELECTORS = [
   'button:has-text("Download CV")',
   '[role="button"]:has-text("Download CV")',
   'a:has-text("Download CV")',
-  'text=/^\\s*Download\\s+CV\\s*$/i',
   'button:has-text("Download attached CV")',
-  '[role="button"]:has-text("Download attached CV")',
-  'a:has-text("Download attached CV")',
   'button:has-text("Download Resume")',
-  '[role="button"]:has-text("Download Resume")',
-  'a[download]',
-  'a[href*="download" i]',
-  // Icon/SVG buttons (no visible text)
   'button[aria-label*="download" i]',
-  'button[aria-label*="Download" i]',
-  '[role="button"][aria-label*="download" i]',
-  '[title*="download" i]',
-  '[class*="downloadIcon"]',
-  '[class*="download-icon"]',
-  '[class*="downloadBtn"]',
-  '[class*="download-btn"]',
-  '[class*="cvDownload"]',
-  '[class*="cv-download"]',
+  'a[download]',
 ];
 
 // Fallback when Attached CV tab/panel cannot be found.
@@ -299,78 +300,186 @@ async function saveProfileUrlsDebug(urls: string[], sessionDir: string): Promise
   logger.debug('Profile URLs debug saved', { outPath });
 }
 
+function isOnSubuserConflictPage(pageUrl: string): boolean {
+  return /resdex\.naukri\.com\/v2\/(ChangeLogin|ResetLogin)/i.test(pageUrl);
+}
+
+function extractReqUrl(pageUrl: string): string | null {
+  try {
+    return new URL(pageUrl).searchParams.get('requrl');
+  } catch {
+    return null;
+  }
+}
+
+function buildResetLoginUrl(requrl: string): string {
+  return `https://resdex.naukri.com/v2/ResetLogin/displayResetLogin?requrl=${encodeURIComponent(requrl)}`;
+}
+
+/** Click or navigate when Naukri header overlays intercept pointer events. */
+async function gotoResilient(page: Page, url: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt < 2 && /interrupted|Navigation/i.test(msg)) {
+        logger.warn('Navigation interrupted, retrying', { url, attempt: attempt + 1 });
+        await delay(1_500);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+async function clickResilient(page: Page, locator: Locator): Promise<boolean> {
+  const href = await locator.getAttribute('href').catch(() => null);
+  if (href && !/^javascript:/i.test(href)) {
+    const target = new URL(href, page.url()).href;
+    await gotoResilient(page, target);
+    return true;
+  }
+
+  try {
+    await locator.click({ timeout: 5_000, force: true });
+    return true;
+  } catch {
+    try {
+      await locator.evaluate((el) => (el as HTMLElement).click());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function waitForSubuserResolution(
+  page: Page,
+  config: AppConfig,
+  savedSearchUrl: string,
+): Promise<void> {
+  if (!isOnSubuserConflictPage(page.url())) return;
+
+  logger.info('Waiting for subuser conflict resolution in Chrome');
+  console.log('\n=== Naukri subuser conflict ===');
+  console.log('Choose a subuser or click Reset Subuser → Reset & Login in Chrome.\n');
+
+  const deadline = Date.now() + config.loginTimeoutMs;
+  while (Date.now() < deadline) {
+    if (!isOnSubuserConflictPage(page.url())) {
+      logger.info('Subuser conflict resolved manually');
+      return;
+    }
+    await delay(1_000);
+  }
+
+  if (isOnSubuserConflictPage(page.url())) {
+    await gotoResilient(page, savedSearchUrl);
+    if (!isOnSubuserConflictPage(page.url())) return;
+  }
+
+  throw new Error(
+    'Naukri subuser conflict not resolved. Reset subuser in Chrome, then retry the fetch.',
+  );
+}
+
+interface SubuserConflictResult {
+  detected: boolean;
+  resolved: boolean;
+}
+
 /**
  * Detects and handles the Resdex "Someone is already logged in" subuser conflict page.
- * Clicks "Reset Subuser" tab → "Reset & Login" button automatically.
- * Returns true if conflict was detected and handled, false if no conflict page.
+ * Navigates to Reset Subuser (avoids overlay-blocked tab clicks) → Reset & Login.
  */
-async function handleSubuserConflict(page: Page): Promise<boolean> {
-  // Check if we're on the conflict page by looking for the key text
+async function handleSubuserConflict(page: Page): Promise<SubuserConflictResult> {
+  const pageUrl = page.url();
   const conflictText = await page
-    .locator('text=/Someone is already logged into Resdex/i')
+    .locator('text=/Someone is already logged into Resdex|Available subuser|Resdex Change Login/i')
     .first()
     .isVisible()
     .catch(() => false);
 
-  if (!conflictText) return false; // No conflict, nothing to do
+  if (!isOnSubuserConflictPage(pageUrl) && !conflictText) {
+    return { detected: false, resolved: false };
+  }
 
   logger.info('Subuser conflict page detected — attempting auto-reset');
   logger.warn('Subuser conflict detected — auto-resetting');
 
+  const requrl = extractReqUrl(pageUrl) ?? extractReqUrl(page.url());
+
   try {
-    // Step 1: Click "Reset Subuser" tab
-    const resetTab = page
-      .locator('[role="tab"]:has-text("Reset Subuser"), button:has-text("Reset Subuser"), a:has-text("Reset Subuser")')
-      .first();
-
-    const tabVisible = await resetTab.isVisible().catch(() => false);
-    if (!tabVisible) {
-      logger.warn('Reset Subuser tab not found');
-      return false;
+    if (requrl && !/\/ResetLogin\/displayResetLogin/i.test(page.url())) {
+      await gotoResilient(page, buildResetLoginUrl(requrl));
+      await delay(1_000);
+      logger.info('Navigated to Reset Subuser page', { url: page.url() });
+    } else if (!/\/ResetLogin\/displayResetLogin/i.test(page.url())) {
+      const resetTab = page
+        .locator('a[href*="ResetLogin/displayResetLogin"], a:has-text("Reset Subuser")')
+        .first();
+      if (!(await clickResilient(page, resetTab))) {
+        logger.warn('Could not open Reset Subuser tab');
+        return { detected: true, resolved: false };
+      }
+      await delay(1_000);
+      logger.info('Opened Reset Subuser tab');
     }
 
-    await resetTab.click({ timeout: 8_000 });
-    await delay(1_000);
-    logger.info('Clicked Reset Subuser tab');
-
-    // Step 2: Click "Reset & Login" button
     const resetBtn = page
-      .locator('button:has-text("Reset & Login"), [role="button"]:has-text("Reset & Login"), input[value="Reset & Login"]')
+      .locator(
+        'button:has-text("Reset & Login"), [role="button"]:has-text("Reset & Login"), input[value*="Reset"], a:has-text("Reset & Login")',
+      )
       .first();
 
-    const btnVisible = await resetBtn.isVisible({ timeout: 5_000 }).catch(() => false);
+    const btnVisible = await resetBtn.isVisible({ timeout: 8_000 }).catch(() => false);
     if (!btnVisible) {
-      logger.warn('Reset & Login button not found after clicking tab');
-      return false;
+      logger.warn('Reset & Login button not found on reset page');
+      return { detected: true, resolved: false };
     }
 
-    await resetBtn.click({ timeout: 8_000 });
+    if (!(await clickResilient(page, resetBtn))) {
+      logger.warn('Reset & Login button click failed');
+      return { detected: true, resolved: false };
+    }
     logger.info('Clicked Reset & Login');
 
-    // Step 3: Wait for redirect away from conflict/login page
-    await page.waitForURL(
-      (url) => !url.toString().includes('login') && !url.toString().includes('conflict'),
-      { timeout: 15_000 }
-    ).catch(() => undefined);
+    await page
+      .waitForURL(
+        (url) => {
+          const s = url.toString();
+          if (/ChangeLogin|ResetLogin/i.test(s)) return false;
+          if (requrl && s.includes(decodeURIComponent(requrl))) return true;
+          return /resdex\.naukri\.com\/v3/i.test(s);
+        },
+        { timeout: 20_000 },
+      )
+      .catch(() => undefined);
+
+    if (isOnSubuserConflictPage(page.url()) && requrl) {
+      logger.info('Navigating directly to saved search after reset', { requrl });
+      await gotoResilient(page, requrl);
+    }
 
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => undefined);
 
     const finalUrl = page.url();
     logger.info('Post-reset URL', { url: finalUrl });
 
-    if (finalUrl.includes('login')) {
-      logger.warn('Still on login page after subuser reset');
-      return false;
+    if (isOnSubuserConflictPage(finalUrl) || /recruit\/login/i.test(finalUrl)) {
+      logger.warn('Still on conflict/login page after subuser reset');
+      return { detected: true, resolved: false };
     }
 
     logger.info('Subuser conflict resolved');
-    return true;
-
+    return { detected: true, resolved: true };
   } catch (err) {
     logger.error('Failed to handle subuser conflict', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return false;
+    return { detected: true, resolved: false };
   }
 }
 
@@ -398,32 +507,111 @@ export async function downloadTopResdexResumes(
     const page = await createPage(context);
     const limit = Math.max(1, config.downloadLimit);
 
+    const searchUrl = withActiveInDays(config.resdexSavedSearchUrl!);
+    if (searchUrl !== config.resdexSavedSearchUrl) {
+      logger.info('Rewrote Resdex URL Active in to 30 days', {
+        from: config.resdexSavedSearchUrl,
+        to: searchUrl,
+      });
+      console.log('Naukri: set Active in=30 via URL (was different in saved search link)');
+    }
+
     logger.info('Opening Resdex saved search/folder', {
-      url: config.resdexSavedSearchUrl,
+      url: searchUrl,
       downloadLimit: config.downloadLimit,
       limit,
     });
 
-    await page.goto(config.resdexSavedSearchUrl, {
+    await page.goto(searchUrl, {
       waitUntil: 'domcontentloaded',
       timeout: config.sessionValidateTimeoutMs,
     });
     await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => undefined);
 
+    await waitForResdexAccess(page, config);
+
     // ── Handle subuser conflict if present ──────────────────────────────────
-    const conflictFound = await handleSubuserConflict(page);
-    if (conflictFound) {
-      // After reset, navigate back to the saved search URL
+    const subuser = await handleSubuserConflict(page);
+    if (subuser.detected && !subuser.resolved) {
+      await waitForSubuserResolution(page, config, searchUrl);
+    }
+    if (
+      subuser.detected ||
+      isOnSubuserConflictPage(page.url()) ||
+      !/resdex\.naukri\.com\/v3\/search/i.test(page.url())
+    ) {
       logger.info('Re-navigating to saved search after subuser reset');
-      await page.goto(config.resdexSavedSearchUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: config.sessionValidateTimeoutMs,
-      });
+      await gotoResilient(page, searchUrl);
       await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => undefined);
     }
 
-    const profileUrls = await collectProfileLinks(page, limit);
-    
+    // Subuser reset often drops activeIn back to the saved-search value (e.g. 23).
+    // Force the rewritten URL again before filters/collection.
+    if (!/activeIn=30\b/i.test(page.url())) {
+      const corrected = withActiveInDays(page.url() || searchUrl);
+      logger.info('Re-applying Active in=30 after navigation drift', {
+        from: page.url(),
+        to: corrected,
+      });
+      console.log('Naukri: re-applied Active in=30 after subuser/login redirected away');
+      await gotoResilient(page, corrected);
+      await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => undefined);
+    }
+
+    const filterResult = await applyResdexSearchFilters(page);
+    if (!filterResult.ok) {
+      await saveResdexDebugSnapshot(page, config, 'filters-not-applied');
+      throw new Error(
+        `Naukri filters not applied — refusing to pick profiles. ${filterResult.reason ?? ''}`.trim(),
+      );
+    }
+
+    console.log('Naukri: filters ready — indexing result page…');
+
+    // Dedup across runs by candidate name — Naukri preview URLs carry no stable
+    // per-candidate id, so we track names we've already downloaded and skip them.
+    const skipDownloaded = parseBool(process.env.NAUKRI_SKIP_DOWNLOADED, true);
+    const history = createDownloadedProfilesHistory(config);
+    if (skipDownloaded) {
+      await history.load();
+      // Recognize resumes downloaded before dedup existed (or in earlier runs)
+      // by seeding from files already on disk, so we don't re-fetch them.
+      const seedDirs = [
+        config.localSaveDir,
+        path.join(config.sessionDir, 'downloads'),
+      ].filter((d): d is string => Boolean(d));
+      const seeded = await history.seedFromDirectories(seedDirs);
+      logger.info('Loaded downloaded-profiles history', {
+        knownCandidates: history.size(),
+        seededFromDisk: seeded,
+      });
+    }
+
+    // Collect a small buffer above the requested count so we can skip
+    // already-downloaded / no-CV profiles — but do NOT open dozens of tabs
+    // when the user only asked for 1 CV.
+    const maxAttempts = Math.min(
+      40,
+      limit + Math.min(5, Math.max(2, limit)),
+    );
+    const poolTarget = skipDownloaded
+      ? Math.min(
+          40,
+          Math.max(maxAttempts, limit + Math.max(8, Math.min(history.size() + 5, 20))),
+        )
+      : limit;
+    const skipNameOnResultsPage = skipDownloaded
+      ? (name: string | undefined) => history.has(name)
+      : undefined;
+
+    logger.info('Indexing search page for profile links', {
+      poolTarget,
+      maxAttempts,
+      limit,
+      skipKnownNames: Boolean(skipNameOnResultsPage),
+    });
+    const profileUrls = await collectProfileLinks(page, poolTarget, skipNameOnResultsPage);
+
     // debug 
     await saveProfileUrlsDebug(profileUrls, config.sessionDir);
 
@@ -437,6 +625,7 @@ export async function downloadTopResdexResumes(
     logger.info('Collected candidate profile links', {
       count: profileUrls.length,
     });
+    console.log(`totalDiscovered=${profileUrls.length}`);
 
     // const results: ResdexResumeDownloadResult[] = [];
 
@@ -466,20 +655,86 @@ export async function downloadTopResdexResumes(
     logger.info('Starting downloads from rank', {
       startRank,
       startIndex,
-      remaining: profileUrls.length - startIndex,
+      poolSize: profileUrls.length,
+      target: limit,
+      maxAttempts,
     });
-    
+
     const results: ResdexResumeDownloadResult[] = [];
+    let newDownloads = 0;
+    let skippedDuplicates = 0;
+    // Claim names as soon as we decide to process them so the same person cannot
+    // be downloaded twice in this fetch (even before history.persist finishes).
+    const claimedThisRun = new Set<string>();
+    const isAlreadyDownloaded = skipDownloaded
+      ? (name: string | undefined) => {
+          const key = normalizeCandidateName(name);
+          if (!key) return false;
+          if (history.has(name) || claimedThisRun.has(key)) return true;
+          return false;
+        }
+      : (name: string | undefined) => {
+          const key = normalizeCandidateName(name);
+          return key ? claimedThisRun.has(key) : false;
+        };
+    const claimName = (name: string | undefined) => {
+      const key = normalizeCandidateName(name);
+      if (key) claimedThisRun.add(key);
+    };
+
     for (let i = startIndex; i < profileUrls.length; i++) {
+      if (newDownloads >= limit) {
+        logger.info('Reached requested download count', { limit, newDownloads });
+        break;
+      }
+
+      const attempt = i - startIndex + 1;
+      if (attempt > maxAttempts) {
+        logger.warn('Stopped after max profile attempts without reaching requested count', {
+          maxAttempts,
+          newDownloads,
+          limit,
+        });
+        console.log(
+          `Naukri: stopped after trying ${maxAttempts} profile(s) (requested ${limit} CV(s), got ${newDownloads})`,
+        );
+        break;
+      }
+
       const rank = i + 1;
-      const result = await processProfile(context, config, profileUrls[i]!, rank);
+      const result = await processProfile(
+        context,
+        page,
+        config,
+        profileUrls[i]!,
+        rank,
+        isAlreadyDownloaded,
+        claimName,
+      );
       results.push(result);
       printProfileStatus(result);
-    
-      // Preventive break every 20 downloads
-      const downloaded = i - startIndex + 1;
-      if (downloaded % 20 === 0 && i + 1 < profileUrls.length) {
-        logger.info('Preventive break after batch of downloads', { downloaded });
+
+      if (
+        result.status === 'skipped' &&
+        result.skipReason?.includes('already downloaded')
+      ) {
+        skippedDuplicates += 1;
+        // Duplicates are cheap to skip — keep scanning without a long pause.
+        await randomDelay(400, 900);
+        continue;
+      }
+
+      if (isSuccessfulDownload(result)) {
+        newDownloads += 1;
+        claimName(result.candidateName);
+        if (skipDownloaded) {
+          await history.record(result.candidateName);
+        }
+      }
+
+      // Preventive break every 20 actual downloads
+      if (newDownloads > 0 && newDownloads % 20 === 0 && newDownloads < limit) {
+        logger.info('Preventive break after batch of downloads', { newDownloads });
         await delay(120_000);
       } else {
         await humanPause(i + 1); // human pause
@@ -487,6 +742,21 @@ export async function downloadTopResdexResumes(
       }
     }
 
+    if (skippedDuplicates > 0) {
+      logger.info('Skipped already-downloaded candidates', {
+        skippedDuplicates,
+        newDownloads,
+      });
+      console.log(`Skipped ${skippedDuplicates} already-downloaded candidate(s)`);
+    }
+    if (newDownloads < limit) {
+      logger.warn('Ran out of fresh candidates before reaching requested count', {
+        requested: limit,
+        newDownloads,
+        skippedDuplicates,
+        poolSize: profileUrls.length,
+      });
+    }
 
     await page.close().catch(() => undefined);
     return results;
@@ -495,117 +765,169 @@ export async function downloadTopResdexResumes(
   }
 }
 
-// async function collectProfileLinks(page: Page, limit: number): Promise<string[]> {
-//   const urls: string[] = [];
-//   const seen = new Set<string>();
-
-//   const maxScrolls = Math.max(8, Math.ceil(limit / 3));
-//   for (let scroll = 0; scroll < maxScrolls && urls.length < limit; scroll++) {
-//     for (const selector of PROFILE_LINK_SELECTORS) {
-//       const links = page.locator(selector);
-//       const count = Math.min(await links.count().catch(() => 0), limit * 8);
-
-//       for (let i = 0; i < count && urls.length < limit; i++) {
-//         const href = await links.nth(i).getAttribute('href').catch(() => null);
-//         if (!href) continue;
-
-//         const normalized = normalizeUrl(page.url(), href);
-//         if (!normalized || seen.has(normalized) || !looksLikeCandidateUrl(normalized)) {
-//           continue;
-//         }
-
-//         seen.add(normalized);
-//         urls.push(normalized);
-//       }
-//     }
-
-//     if (urls.length >= limit) break;
-//     await page.mouse.wheel(0, 2500).catch(() => undefined);
-//     await delay(500);
-//   }
-
-//   const collected = urls.slice(0, limit);
-//   logger.info('Profile links collected', { requested: limit, found: collected.length });
-//   return collected;
-// }
-
-async function collectProfileLinks(page: Page, limit: number): Promise<string[]> {
+async function collectProfileLinks(
+  page: Page,
+  limit: number,
+  shouldSkipName?: (name: string | undefined) => boolean,
+): Promise<string[]> {
   const urls: string[] = [];
-  const seen = new Set<string>();
+  const seenUrls = new Set<string>();
+  const seenIdentities = new Set<string>();
   let currentPageNo = 1;
   const PAGE_SIZE = 40; // Resdex shows 40 profiles per page
+  let skippedKnown = 0;
 
   while (urls.length < limit) {
     logger.info('Scanning page for profile links', {
       pageNo: currentPageNo,
       collectedSoFar: urls.length,
       limit,
+      skippedKnown,
     });
 
-    // ── Collect links visible on THIS page only (no aggressive scrolling) ──
-    const pageUrls: string[] = [];
+    // Prefer v3/preview links with tupleIndex — one stable link per search card.
+    const pageCandidates: {
+      url: string;
+      tupleIndex: number;
+      identity: string;
+      name?: string;
+    }[] = [];
 
     for (const selector of PROFILE_LINK_SELECTORS) {
       const links = page.locator(selector);
       const count = await links.count().catch(() => 0);
 
       for (let i = 0; i < count; i++) {
-        const href = await links.nth(i).getAttribute('href').catch(() => null);
+        const link = links.nth(i);
+        const href = await link.getAttribute('href').catch(() => null);
         if (!href) continue;
 
         const normalized = normalizeUrl(page.url(), href);
         if (
           !normalized ||
-          seen.has(normalized) ||
+          seenUrls.has(normalized) ||
           !looksLikeCandidateUrl(normalized)
-        ) continue;
+        ) {
+          continue;
+        }
 
-        seen.add(normalized);
-        pageUrls.push(normalized);
+        const identity = candidateIdentityFromUrl(normalized) ?? `url:${normalized}`;
+        if (seenIdentities.has(identity)) {
+          seenUrls.add(normalized);
+          continue;
+        }
 
-        // Stop collecting once we hit PAGE_SIZE for this page
-        if (pageUrls.length >= PAGE_SIZE) break;
+        let tupleIndex = Number.MAX_SAFE_INTEGER;
+        try {
+          const raw = new URL(normalized).searchParams.get('tupleIndex');
+          if (raw != null && raw !== '') tupleIndex = Number.parseInt(raw, 10);
+          if (!Number.isFinite(tupleIndex)) tupleIndex = Number.MAX_SAFE_INTEGER;
+        } catch {
+          // ignore
+        }
+
+        const rawName = (await link.innerText().catch(() => '')).trim();
+        const name = rawName.split('\n')[0]?.trim() || undefined;
+
+        seenUrls.add(normalized);
+        seenIdentities.add(identity);
+        pageCandidates.push({ url: normalized, tupleIndex, identity, name });
       }
+    }
 
-      if (pageUrls.length >= PAGE_SIZE) break;
+    // Keep one URL per identity, ordered by search rank (tupleIndex).
+    pageCandidates.sort((a, b) => a.tupleIndex - b.tupleIndex);
+    const pageUrls: string[] = [];
+    for (const c of pageCandidates.slice(0, PAGE_SIZE)) {
+      if (shouldSkipName?.(c.name)) {
+        skippedKnown += 1;
+        logger.info('Skipping known candidate on results page', {
+          name: c.name,
+          tupleIndex: c.tupleIndex,
+        });
+        continue;
+      }
+      pageUrls.push(c.url);
     }
 
     urls.push(...pageUrls);
 
     logger.info('Page scan complete', {
       pageNo: currentPageNo,
-      foundOnPage: pageUrls.length,
+      foundOnPage: pageCandidates.length,
+      keptOnPage: pageUrls.length,
       totalSoFar: urls.length,
+      skippedKnown,
       limit,
     });
 
-    // ── Done if limit reached ──────────────────────────────────────────────
     if (urls.length >= limit) {
       break;
     }
 
-    // ── No profiles found on this page — something is wrong ───────────────
-    if (pageUrls.length === 0) {
+    if (pageCandidates.length === 0) {
       logger.warn('No profiles found on search page', { pageNo: currentPageNo });
       break;
     }
 
-    // ── Still need more — wait for user to go to next page ─────────────────
-    logger.info('Waiting for next search page', { nextPage: currentPageNo + 1 });
-
-    await delay(5_000);
-
-    await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => undefined);
-    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => undefined);
-    await delay(500);
-
-    currentPageNo++;
+    // Need more fresh profiles — go to the next SRP page automatically.
+    const moved = await goToNextSearchPage(page, currentPageNo + 1);
+    if (!moved) {
+      logger.info('No further search pages available', {
+        pageNo: currentPageNo,
+        collected: urls.length,
+      });
+      break;
+    }
+    currentPageNo += 1;
   }
 
   const collected = urls.slice(0, limit);
-  logger.info('Profile links collected', { requested: limit, found: collected.length });
+  logger.info('Profile links collected', {
+    requested: limit,
+    found: collected.length,
+    skippedKnown,
+  });
+  if (skippedKnown > 0) {
+    console.log(`Naukri: skipped ${skippedKnown} already-downloaded name(s) on results page`);
+  }
   return collected;
 }
+
+async function goToNextSearchPage(page: Page, nextPageNo: number): Promise<boolean> {
+  logger.info('Navigating to next search page', { nextPage: nextPageNo });
+
+  const candidates = [
+    page.getByRole('button', { name: /^next$/i }).first(),
+    page.getByRole('link', { name: /^next$/i }).first(),
+    page.locator('a, button').filter({ hasText: /^›$|^>$|^Next$/i }).first(),
+    page.locator('[aria-label*="next" i]').first(),
+    page.locator(`a[href*="pageNo=${nextPageNo}"]`).first(),
+  ];
+
+  for (const control of candidates) {
+    if (!(await control.isVisible({ timeout: 800 }).catch(() => false))) continue;
+    if (await control.isDisabled().catch(() => false)) continue;
+    await control.click({ timeout: 8000 }).catch(() => undefined);
+    await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => undefined);
+    await delay(600);
+    return true;
+  }
+
+  // Fallback: rewrite pageNo in the URL.
+  try {
+    const url = new URL(page.url());
+    url.searchParams.set('pageNo', String(nextPageNo));
+    await page.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => undefined);
+    await delay(600);
+    return new RegExp(`pageNo=${nextPageNo}\\b`, 'i').test(page.url());
+  } catch {
+    return false;
+  }
+}
+
 
 async function saveResdexDebugSnapshot(
   page: Page,
@@ -719,27 +1041,28 @@ async function buildProfileResult(
 
 export async function processProfile(
   context: BrowserContext,
+  page: Page,
   config: AppConfig,
   profileUrl: string,
   rank: number,
+  isAlreadyDownloaded?: (name: string | undefined) => boolean,
+  claimDownloadedName?: (name: string | undefined) => void,
 ): Promise<ResdexResumeDownloadResult> {
-  const page = await createPage(context);
   const downloadDir = path.join(config.sessionDir, 'downloads');
   await fs.ensureDir(downloadDir);
   let candidateName: string | undefined;
 
   try {
+    // Stay on the same automation tab — navigate in-place (no newPage).
+    await closeExtraPages(context, page);
+
     logger.info('Opening candidate profile', { rank, profileUrl });
-    // await page.goto(profileUrl, {
-    //   waitUntil: 'domcontentloaded',
-    //   timeout: config.sessionValidateTimeoutMs,
-    // });
     const profileWithTab = new URL(profileUrl);
     profileWithTab.searchParams.set('tabKey', 'videoAndCv');
 
     await page.goto(profileWithTab.toString(), {
-    waitUntil: 'domcontentloaded',
-    timeout: config.sessionValidateTimeoutMs,
+      waitUntil: 'domcontentloaded',
+      timeout: config.sessionValidateTimeoutMs,
     });
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => undefined);
 
@@ -756,6 +1079,27 @@ export async function processProfile(
     }
 
     candidateName = await readCandidateName(page);
+
+    // Skip candidates we've already fetched in a previous run or earlier in
+    // this run. Naukri preview URLs have no stable id across searches.
+    if (isAlreadyDownloaded?.(candidateName)) {
+      logger.info('Skipping profile — already downloaded', {
+        rank,
+        candidateName,
+      });
+      return {
+        rank,
+        profileUrl,
+        candidateName,
+        status: 'skipped',
+        skipReason: 'already downloaded (previous run)',
+      };
+    }
+
+    // Claim before download so a later profile with the same name in this
+    // fetch cannot also download (within-run dedup).
+    claimDownloadedName?.(candidateName);
+
     const downloadOutcome = await downloadResume(
       context,
       page,
@@ -775,7 +1119,6 @@ export async function processProfile(
       } else {
         logManualSaveResult({ kind: 'needs-user-action' }, rank);
       }
-      // await waitForUserToContinue(rank, candidateName);
       await delay(config.manualDownloadPauseMs);
     }
 
@@ -819,7 +1162,8 @@ export async function processProfile(
       error: message,
     };
   } finally {
-    await page.close().catch(() => undefined);
+    // If Download CV opened a PDF popup, close it — keep the main automation tab.
+    await closeExtraPages(context, page);
   }
 }
 
@@ -946,6 +1290,11 @@ async function downloadResume(
   );
   if (fallback) return fallback;
 
+  const skipReason = await getSkipReasonIfNoCvOnProfile(page);
+  if (skipReason) {
+    throw new NoAttachedCvError(skipReason);
+  }
+
   throw new Error(
     config.manualDownloadSave
       ? 'Could not click Download CV on Attached CV. Run with HEADLESS=false and check ATTACHED_CV_* selectors.'
@@ -977,6 +1326,10 @@ async function downloadViaAttachedCvPage(
 
   await assertAttachedCvAvailable(page);
 
+  const watchDirs = resumeWatchDirs(config, downloadDir);
+  const before = await listResumeFilesInDirs(watchDirs);
+  const sinceMs = Date.now();
+
   const fromPanel = await clickDownloadCvInAttachedCvPanel(
     context,
     page,
@@ -987,7 +1340,7 @@ async function downloadViaAttachedCvPage(
   );
   if (fromPanel) return fromPanel;
 
-  return tryDownloadResumeFromContext(
+  const retryDownload = await tryDownloadResumeFromContext(
     context,
     page,
     config,
@@ -995,6 +1348,22 @@ async function downloadViaAttachedCvPage(
     rank,
     candidateName,
     ATTACHED_CV_DOWNLOAD_SELECTORS,
+  );
+  if (retryDownload) return retryDownload;
+
+  const claimed = await claimLeakedChromeResume({
+    dirs: watchDirs,
+    sinceMs,
+    before,
+    downloadDir,
+    rank,
+    candidateName,
+  });
+  if (claimed) return claimed;
+
+  const skipReason = await getSkipReasonIfNoCvOnProfile(page);
+  throw new NoAttachedCvError(
+    skipReason ?? 'No downloadable CV on Attached CV tab',
   );
 }
 
@@ -1060,7 +1429,7 @@ async function clickDownloadCvInAttachedCvPanel(
       const panels = frame.locator(panelSelector);
       const panelCount = await panels.count().catch(() => 0);
 
-      for (let p = 0; p < Math.min(panelCount, 3); p++) {
+      for (let p = 0; p < Math.min(panelCount, 2); p++) {
         const panel = panels.nth(p);
         if (!(await panel.isVisible().catch(() => false))) continue;
 
@@ -1084,12 +1453,14 @@ async function clickDownloadCvInAttachedCvPanel(
               );
               return result;
             }
+            // Click may have leaked into ~/Downloads — stop before overlapping selectors.
+            return null;
           }
         } catch {
           // continue with selector list
         }
 
-        for (const downloadSelector of ATTACHED_CV_DOWNLOAD_SELECTORS) {
+        for (const downloadSelector of ATTACHED_CV_DOWNLOAD_SELECTORS.slice(0, 3)) {
           const result = await tryClickDownloadControl(
             context,
             frame,
@@ -1108,12 +1479,14 @@ async function clickDownloadCvInAttachedCvPanel(
             );
             return result;
           }
+          // One selector click is enough; outer claim path will recover leaks.
+          return null;
         }
       }
     }
 
     // Frame-level: Download CV visible after Attached CV tab (no panel wrapper found).
-    for (const downloadSelector of ATTACHED_CV_DOWNLOAD_SELECTORS) {
+    for (const downloadSelector of ATTACHED_CV_DOWNLOAD_SELECTORS.slice(0, 3)) {
       const result = await tryClickDownloadControl(
         context,
         frame,
@@ -1124,6 +1497,7 @@ async function clickDownloadCvInAttachedCvPanel(
         candidateName,
       );
       if (result) return result;
+      return null;
     }
   }
 
@@ -1168,6 +1542,122 @@ async function clickDownloadCvInAttachedCvPanel(
 //   return null;
 // }
 
+/** Folders where Chrome may drop a CV when Playwright misses the download event. */
+function resumeWatchDirs(config: AppConfig, downloadDir: string): string[] {
+  const dirs = [
+    downloadDir,
+    config.localSaveDir,
+    path.join(config.sessionDir, 'downloads'),
+    path.join(os.homedir(), 'Downloads'),
+  ].filter((d): d is string => Boolean(d));
+  return [...new Set(dirs.map((d) => path.resolve(d)))];
+}
+
+async function listResumeFilesInDirs(
+  dirs: string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  for (const dir of dirs) {
+    if (!(await fs.pathExists(dir))) continue;
+    const entries = await fs.readdir(dir).catch(() => [] as string[]);
+    for (const name of entries) {
+      if (!/\.(pdf|docx?)$/i.test(name) || name.startsWith('.') || name.startsWith('~')) {
+        continue;
+      }
+      const full = path.join(dir, name);
+      const st = await fs.stat(full).catch(() => null);
+      if (!st?.isFile()) continue;
+      out.set(full, st.mtimeMs);
+    }
+  }
+  return out;
+}
+
+function naukriDownloadBaseName(filePath: string): string {
+  return path
+    .basename(filePath)
+    .replace(/ \(\d+\)(\.[^.]+)$/i, '$1')
+    .toLowerCase();
+}
+
+/**
+ * When Playwright misses the download event, Chrome still saves Naukri_*.pdf
+ * (often into ~/Downloads). Claim the newest file from this click and remove
+ * same-burst duplicates so we don't keep clicking Download CV.
+ */
+async function claimLeakedChromeResume(opts: {
+  dirs: string[];
+  sinceMs: number;
+  before: Map<string, number>;
+  downloadDir: string;
+  rank: number;
+  candidateName?: string;
+}): Promise<string | null> {
+  const after = await listResumeFilesInDirs(opts.dirs);
+  const newcomers: { file: string; mtime: number }[] = [];
+
+  for (const [file, mtime] of after) {
+    if (mtime + 50 < opts.sinceMs - 2_000) continue;
+    const prev = opts.before.get(file);
+    if (prev !== undefined && mtime <= prev) continue;
+    newcomers.push({ file, mtime });
+  }
+
+  if (newcomers.length === 0) return null;
+
+  newcomers.sort((a, b) => b.mtime - a.mtime);
+  const naukriFirst = newcomers.filter((n) =>
+    /^naukri_/i.test(path.basename(n.file)),
+  );
+  const pick = naukriFirst[0] ?? newcomers[0];
+  if (!pick || !(await isValidResumeFile(pick.file))) return null;
+
+  await fs.ensureDir(opts.downloadDir);
+  const dest = path.join(
+    opts.downloadDir,
+    buildResumeFileName(opts.rank, opts.candidateName, path.basename(pick.file)),
+  );
+
+  if (path.resolve(pick.file) !== path.resolve(dest)) {
+    await fs.move(pick.file, dest, { overwrite: true });
+  }
+
+  const base = naukriDownloadBaseName(pick.file);
+  for (const n of newcomers) {
+    if (path.resolve(n.file) === path.resolve(pick.file)) continue;
+    if (path.resolve(n.file) === path.resolve(dest)) continue;
+    if (naukriDownloadBaseName(n.file) !== base) continue;
+    await fs.remove(n.file).catch(() => undefined);
+  }
+
+  logger.info('Claimed CV Chrome saved outside Playwright capture', {
+    from: pick.file,
+    to: dest,
+    burstDuplicatesRemoved: newcomers.length - 1,
+  });
+  return dest;
+}
+
+async function savePlaywrightDownload(
+  download: Download,
+  downloadDir: string,
+  rank: number,
+  candidateName?: string,
+): Promise<string> {
+  const suggested = download.suggestedFilename() || `resume-${rank}.pdf`;
+  const filePath = path.join(
+    downloadDir,
+    buildResumeFileName(rank, candidateName, suggested),
+  );
+  await fs.ensureDir(downloadDir);
+  await download.saveAs(filePath);
+  if (!(await isValidResumeFile(filePath))) {
+    await fs.remove(filePath).catch(() => undefined);
+    throw new Error('Downloaded file was not a recognized resume (PDF/DOC/DOCX)');
+  }
+  return filePath;
+}
+
 async function tryClickDownloadControl(
   context: BrowserContext,
   frame: Frame,
@@ -1178,7 +1668,9 @@ async function tryClickDownloadControl(
   candidateName?: string,
 ): Promise<string | null> {
   const count = await group.count().catch(() => 0);
-  for (let i = 0; i < Math.min(count, 6); i++) {
+  // One visible control is enough — retrying overlapping selectors was clicking
+  // Download CV repeatedly and dumping Naukri_*.pdf into ~/Downloads.
+  for (let i = 0; i < Math.min(count, 2); i++) {
     const control = group.nth(i);
     if (!(await control.isVisible().catch(() => false))) continue;
 
@@ -1222,105 +1714,127 @@ async function tryClickDownloadControl(
         return MANUAL_CLICK_SENTINEL;
       }
 
-      // Race: Naukri may trigger a download event OR open a new tab with the PDF
-      const downloadPromise = context.waitForEvent('download', {
-        timeout: RESUME_DOWNLOAD_TIMEOUT_MS,
-      }).catch(() => null);
+      const watchDirs = resumeWatchDirs(config, downloadDir);
+      const before = await listResumeFilesInDirs(watchDirs);
+      const sinceMs = Date.now();
+      const waitMs = Math.min(20_000, RESUME_DOWNLOAD_TIMEOUT_MS);
 
-      const newPagePromise = context.waitForEvent('page', {
-        timeout: 10_000,
-      }).catch(() => null);
+      const captured: { download: Download | null; page: Page | null } = {
+        download: null,
+        page: null,
+      };
+      const downloadWait = context
+        .waitForEvent('download', { timeout: waitMs })
+        .then((d) => {
+          captured.download = d;
+          return d;
+        })
+        .catch(() => null);
+      const pageWait = context
+        .waitForEvent('page', { timeout: waitMs })
+        .then((p) => {
+          captured.page = p;
+          return p;
+        })
+        .catch(() => null);
 
       await control.click({ timeout: 12_000 });
 
-      // Wait for whichever fires first
-      const result = await Promise.race([
-        downloadPromise.then((d) => d ? ({ type: 'download' as const, value: d }) : null),
-        newPagePromise.then((p) => p ? ({ type: 'page' as const, value: p }) : null),
-      ]);
-
-      if (!result) {
-        logger.debug('No download or new page after click, trying next selector');
-        continue;
-      }
-
-      // --- Path A: direct browser download ---
-      if (result.type === 'download') {
-        const download = result.value;
-        const suggested = download.suggestedFilename() || `resume-${rank}.pdf`;
-        const filePath = path.join(
-          downloadDir,
-          buildResumeFileName(rank, candidateName, suggested),
-        );
-        await download.saveAs(filePath);
-        if (!(await isValidResumeFile(filePath))) {
-          await fs.remove(filePath).catch(() => undefined);
-          throw new Error('Downloaded file was not a recognized resume (PDF/DOC/DOCX)');
+      // Poll for Playwright download, new tab, OR a file Chrome already wrote.
+      // Do not Promise.race timeout-null (that used to win at 10s and click again).
+      const deadline = Date.now() + waitMs;
+      while (Date.now() < deadline) {
+        if (captured.download) {
+          await Promise.allSettled([downloadWait, pageWait]);
+          return savePlaywrightDownload(
+            captured.download,
+            downloadDir,
+            rank,
+            candidateName,
+          );
         }
-        return filePath;
-      }
+        if (captured.page) {
+          const openedPage = captured.page;
+          await Promise.allSettled([downloadWait, pageWait]);
+          await openedPage
+            .waitForLoadState('domcontentloaded', { timeout: 15_000 })
+            .catch(() => undefined);
+          const pdfUrl = openedPage.url();
+          logger.info('CV opened in new tab', { pdfUrl });
 
-      // --- Path B: CV opened in a new tab (PDF viewer) ---
-      if (result.type === 'page') {
-        const newPage = result.value;
-        await newPage.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => undefined);
-        const pdfUrl = newPage.url();
-        logger.info('CV opened in new tab', { pdfUrl });
+          const tabDownload = await openedPage
+            .waitForEvent('download', { timeout: 8_000 })
+            .catch(() => null);
+          if (tabDownload) {
+            const filePath = await savePlaywrightDownload(
+              tabDownload,
+              downloadDir,
+              rank,
+              candidateName,
+            );
+            await openedPage.close().catch(() => undefined);
+            return filePath;
+          }
 
-        // Try triggering a download from within the new tab first
-        const tabDownload = await newPage.waitForEvent('download', { timeout: 8_000 }).catch(() => null);
-        if (tabDownload) {
-          const suggested = tabDownload.suggestedFilename() || `resume-${rank}.pdf`;
+          const cookies = await context.cookies();
+          const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+          await openedPage.close().catch(() => undefined);
+
+          if (!pdfUrl || pdfUrl === 'about:blank') {
+            throw new Error('New tab opened but URL was blank');
+          }
+
+          const response = await fetch(pdfUrl, {
+            headers: {
+              Cookie: cookieHeader,
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+                '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            },
+          });
+          if (!response.ok) {
+            throw new Error(`Failed to fetch CV from new tab URL: ${response.status}`);
+          }
+
+          const buffer = Buffer.from(await response.arrayBuffer());
           const filePath = path.join(
             downloadDir,
-            buildResumeFileName(rank, candidateName, suggested),
+            buildResumeFileName(rank, candidateName, 'resume.pdf'),
           );
-          await tabDownload.saveAs(filePath);
-          await newPage.close().catch(() => undefined);
+          await fs.writeFile(filePath, buffer);
           if (!(await isValidResumeFile(filePath))) {
             await fs.remove(filePath).catch(() => undefined);
-            throw new Error('Downloaded file from new tab was not a recognized resume');
+            throw new Error('Fetched file from new tab URL was not a recognized resume');
           }
+          logger.info('CV saved via new-tab URL fetch', { filePath });
           return filePath;
         }
 
-        // Fallback: fetch the PDF URL directly using session cookies
-        const cookies = await context.cookies();
-        const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-        await newPage.close().catch(() => undefined);
-
-        if (!pdfUrl || pdfUrl === 'about:blank') {
-          throw new Error('New tab opened but URL was blank');
-        }
-
-        const response = await fetch(pdfUrl, {
-          headers: {
-            Cookie: cookieHeader,
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-              '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          },
-        });
-
-        if (!response.ok) {
-          throw new Error(`Failed to fetch CV from new tab URL: ${response.status}`);
-        }
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        const filePath = path.join(
+        const claimed = await claimLeakedChromeResume({
+          dirs: watchDirs,
+          sinceMs,
+          before,
           downloadDir,
-          buildResumeFileName(rank, candidateName, 'resume.pdf'),
-        );
-        await fs.writeFile(filePath, buffer);
+          rank,
+          candidateName,
+        });
+        if (claimed) return claimed;
 
-        if (!(await isValidResumeFile(filePath))) {
-          await fs.remove(filePath).catch(() => undefined);
-          throw new Error('Fetched file from new tab URL was not a recognized resume');
-        }
-
-        logger.info('CV saved via new-tab URL fetch', { filePath });
-        return filePath;
+        await delay(250);
       }
+
+      await Promise.allSettled([downloadWait, pageWait]);
+      const claimedLate = await claimLeakedChromeResume({
+        dirs: watchDirs,
+        sinceMs,
+        before,
+        downloadDir,
+        rank,
+        candidateName,
+      });
+      if (claimedLate) return claimedLate;
+
+      logger.debug('No download or new page after click, trying next control');
     } catch (err) {
       logger.debug('tryClickDownloadControl attempt failed', {
         index: i,
@@ -1398,6 +1912,39 @@ async function isValidResumeFile(filePath: string): Promise<boolean> {
   return false;
 }
 
+function assertResdexAccessible(page: Page, config: AppConfig): void {
+  const url = page.url();
+  if (/recruit\/login|RPAuthenticate/i.test(url)) {
+    if (config.manualResdexLogin) return;
+    throw new Error(
+      'Naukri login required — sign in via npm run login-naukri, then retry the fetch.',
+    );
+  }
+}
+
+async function waitForResdexAccess(page: Page, config: AppConfig): Promise<void> {
+  assertResdexAccessible(page, config);
+  if (!/recruit\/login|RPAuthenticate/i.test(page.url())) return;
+
+  logger.info('Waiting for Naukri login in Chrome — sign in to continue');
+  console.log('\n=== Naukri login ===');
+  console.log('Sign in in the Chrome window. Downloads will continue automatically.\n');
+
+  const deadline = Date.now() + config.loginTimeoutMs;
+  while (Date.now() < deadline) {
+    const url = page.url();
+    if (/resdex\.naukri\.com/i.test(url) && !/recruit\/login|RPAuthenticate/i.test(url)) {
+      logger.info('Naukri login detected — continuing Resdex download');
+      return;
+    }
+    await delay(1000);
+  }
+
+  throw new Error(
+    `Naukri login timed out after ${config.loginTimeoutMs / 1000}s. Run: npm run login-naukri`,
+  );
+}
+
 function normalizeUrl(baseUrl: string, href: string | null): string | null {
   if (!href) return null;
   try {
@@ -1405,6 +1952,25 @@ function normalizeUrl(baseUrl: string, href: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+/** Stable-enough identity for deduping links on a single search results page. */
+function candidateIdentityFromUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const uniqId = parsed.searchParams.get('uniqId')?.trim();
+    if (uniqId) return `uniq:${uniqId}`;
+    const uresid = parsed.searchParams.get('uresid')?.trim();
+    if (uresid) return `ures:${uresid}`;
+    const tupleIndex = parsed.searchParams.get('tupleIndex')?.trim();
+    const sid = parsed.searchParams.get('sid')?.trim() || parsed.searchParams.get('parentSid')?.trim();
+    if (tupleIndex !== null && tupleIndex !== undefined && sid) {
+      return `tuple:${sid}:${tupleIndex}`;
+    }
+  } catch {
+    // ignore
+  }
+  return undefined;
 }
 
 function looksLikeCandidateUrl(url: string): boolean {
