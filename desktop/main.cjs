@@ -37,12 +37,31 @@ function parseEnv(content) {
   return out;
 }
 
-function serializeEnv(vars) {
+function isPlaceholderSupabaseUrl(url) {
+  const u = (url || "").trim().toLowerCase();
+  return !u || u.includes("your-project.supabase.co") || u.includes("example.supabase.co");
+}
+
+function isUsableSupabaseConfig(vars) {
+  return Boolean(
+    vars.SUPABASE_URL &&
+      vars.SUPABASE_ANON_KEY &&
+      !isPlaceholderSupabaseUrl(vars.SUPABASE_URL),
+  );
+}
+
+function serializeUserEnv(email, supabase = {}) {
+  // Only persist email (+ real Supabase if present). Never write placeholders.
+  const url = isPlaceholderSupabaseUrl(supabase.SUPABASE_URL)
+    ? ""
+    : (supabase.SUPABASE_URL || "");
+  const key = (supabase.SUPABASE_ANON_KEY || "").trim();
   return [
-    "# Perfect Ventures Fetch Agent",
-    `SUPABASE_URL=${vars.SUPABASE_URL || ""}`,
-    `SUPABASE_ANON_KEY=${vars.SUPABASE_ANON_KEY || ""}`,
-    `COMPANION_PORTAL_USER_EMAIL=${vars.COMPANION_PORTAL_USER_EMAIL || ""}`,
+    "# Perfect Ventures Fetch Agent — user preferences",
+    `# Supabase comes from the installer bundle unless set below.`,
+    url ? `SUPABASE_URL=${url}` : "# SUPABASE_URL=",
+    key ? `SUPABASE_ANON_KEY=${key}` : "# SUPABASE_ANON_KEY=",
+    `COMPANION_PORTAL_USER_EMAIL=${email || ""}`,
     "COMPANION_POLL_INTERVAL_MS=5000",
     "COMPANION_HEARTBEAT_INTERVAL_MS=30000",
     "",
@@ -65,13 +84,16 @@ function loadConfig() {
   }
   if (fs.existsSync(userEnvPath())) {
     const user = parseEnv(fs.readFileSync(userEnvPath(), "utf8"));
-    // Prefer user email; only override Supabase when the user file has real values
-    // (avoids wiping repo/CI config with empty keys from an earlier Save).
     if (user.COMPANION_PORTAL_USER_EMAIL) {
       vars.COMPANION_PORTAL_USER_EMAIL = user.COMPANION_PORTAL_USER_EMAIL;
     }
-    if (user.SUPABASE_URL) vars.SUPABASE_URL = user.SUPABASE_URL;
-    if (user.SUPABASE_ANON_KEY) vars.SUPABASE_ANON_KEY = user.SUPABASE_ANON_KEY;
+    // Never let placeholder / empty user prefs wipe installer Supabase config.
+    if (user.SUPABASE_URL && !isPlaceholderSupabaseUrl(user.SUPABASE_URL)) {
+      vars.SUPABASE_URL = user.SUPABASE_URL;
+    }
+    if (user.SUPABASE_ANON_KEY) {
+      vars.SUPABASE_ANON_KEY = user.SUPABASE_ANON_KEY;
+    }
   }
   return vars;
 }
@@ -80,7 +102,11 @@ function saveUserEmail(email) {
   const vars = loadConfig();
   vars.COMPANION_PORTAL_USER_EMAIL = email.trim().toLowerCase();
   fs.mkdirSync(path.dirname(userEnvPath()), { recursive: true });
-  fs.writeFileSync(userEnvPath(), serializeEnv(vars), "utf8");
+  fs.writeFileSync(
+    userEnvPath(),
+    serializeUserEnv(vars.COMPANION_PORTAL_USER_EMAIL, vars),
+    "utf8",
+  );
 }
 
 function agentEnv() {
@@ -190,7 +216,7 @@ ipcMain.handle("get-config", () => {
   const cfg = loadConfig();
   return {
     email: cfg.COMPANION_PORTAL_USER_EMAIL || "",
-    supabaseConfigured: Boolean(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY),
+    supabaseConfigured: isUsableSupabaseConfig(cfg),
     packaged: app.isPackaged,
     agentRoot: agentRoot(),
     status: statusTracker.getState(),
@@ -207,7 +233,7 @@ ipcMain.handle("save-email", (_e, email) => {
 ipcMain.handle("start-agent", async () => {
   if (agentProcess) throw new Error("Agent is already running");
   const cfg = loadConfig();
-  if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) {
+  if (!isUsableSupabaseConfig(cfg)) {
     throw new Error("Supabase not configured in this build");
   }
   if (!cfg.COMPANION_PORTAL_USER_EMAIL?.trim()) {

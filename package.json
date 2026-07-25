@@ -31,11 +31,13 @@
     "dotenv": "^16.4.7",
     "fs-extra": "^11.2.0",
     "playwright": "^1.49.1",
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^22.10.2",
+    "@types/ws": "^8.18.1",
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
     "typescript": "^5.7.2"
@@ -56,23 +58,31 @@
       {
         "from": "dist/agent-bundle",
         "to": "agent",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.business",
       "identity": null,
       "gatekeeperAssess": false
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "installerLanguages": ["en_US"]
+      "installerLanguages": [
+        "en_US"
+      ]
     },
     "dmg": {
       "title": "Perfect Ventures Fetch Agent ${version}"
