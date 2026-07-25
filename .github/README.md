@@ -13,22 +13,40 @@ Workflow: [build.yml](./workflows/build.yml)
 
 Artifacts are uploaded per platform. Tag pushes (`v*`) also create a GitHub Release with both installers attached.
 
-## Required secrets (build time)
+## Branch → Environment mapping
+
+One workflow for both branches. The job selects a GitHub Environment from the ref so installers embed the matching Supabase project:
+
+| Trigger | GitHub Environment | Secrets used |
+|---------|--------------------|--------------|
+| Push / dispatch on `dev` | `dev` | Environment secrets for the **dev** Supabase project |
+| Push / dispatch on `main` | `main` | Environment secrets for the **prod** Supabase project |
+| Tag `v*` | `main` | Same as `main` (production release) |
+
+Secret **names** are identical in both environments; only the values differ.
+
+## Required secrets (per environment)
+
+Create Environments named **`dev`** and **`main`** under **Settings → Environments**, then add the same secret names to each:
 
 | Secret | Purpose |
 |--------|---------|
 | `SUPABASE_URL` | Embedded in installer (`config/team.defaults.env`) |
-| `SUPABASE_ANON_KEY` | Same as portal anon key |
+| `SUPABASE_ANON_KEY` | Same as portal anon key for that project |
 
-Add under **Settings → Secrets and variables → Actions**.
+Do **not** put these in repository-level Actions secrets if you want branch-specific builds — use Environment secrets so `dev` and `main` resolve different Supabase projects.
 
-The workflow fails immediately if either secret is missing.
+The workflow fails immediately if either secret is missing from the selected environment.
 
 ## Trigger a build
 
+### Automatic (branch push)
+
+Push to `dev` or `main` runs the workflow with that branch’s environment.
+
 ### Manual
 
-**Actions** → **Build installers** → **Run workflow**
+**Actions** → **Build installers** → **Run workflow** (pick the branch; that branch selects the environment).
 
 ### Release (both .exe + .dmg on Release page)
 
@@ -37,11 +55,11 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Bump `version` in `package.json` before tagging when releasing a new version.
+Bump `version` in `package.json` before tagging when releasing a new version. Tag builds use the **`main`** environment.
 
 ## Download artifacts
 
-- **Manual run:** open the workflow run → **Artifacts** → `fetch-agent-installer-windows` / `fetch-agent-installer-macos`
+- **Manual / branch run:** open the workflow run → **Artifacts** → `fetch-agent-installer-windows` / `fetch-agent-installer-macos`
 - **Tag run:** **Releases** → pick the tag → download assets
 
 ## Local builds (same as CI)

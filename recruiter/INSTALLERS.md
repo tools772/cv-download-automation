@@ -19,8 +19,8 @@ npm run build:dmg -- --portal-env ../ats-perfect-ventures/.env.local
 
 **Windows .exe** and **macOS .dmg** — built together via GitHub Actions:
 
-1. Add repo secrets `SUPABASE_URL` and `SUPABASE_ANON_KEY` (see [`.github/README.md`](../.github/README.md))
-2. **Actions** → **Build installers** → **Run workflow**
+1. Add environment secrets `SUPABASE_URL` and `SUPABASE_ANON_KEY` on the `dev` and `main` GitHub Environments (see [`.github/README.md`](../.github/README.md))
+2. Push to `dev`/`main`, or **Actions** → **Build installers** → **Run workflow**
 3. Download from **Artifacts**, or push a `v*` tag for a **GitHub Release**
 
 ```bash

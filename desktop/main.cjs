@@ -2,9 +2,11 @@ const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
+const { createStatusTracker } = require("./statusFromLogs.cjs");
 
 let mainWindow = null;
 let agentProcess = null;
+const statusTracker = createStatusTracker();
 
 function agentRoot() {
   if (app.isPackaged) {
@@ -52,8 +54,24 @@ function loadConfig() {
   if (fs.existsSync(teamDefaultsPath())) {
     Object.assign(vars, parseEnv(fs.readFileSync(teamDefaultsPath(), "utf8")));
   }
+  // Dev / unpackaged: also read repo .env and .env.local (same as CLI agent).
+  if (!app.isPackaged) {
+    for (const name of [".env", ".env.local"]) {
+      const p = path.join(agentRoot(), name);
+      if (fs.existsSync(p)) {
+        Object.assign(vars, parseEnv(fs.readFileSync(p, "utf8")));
+      }
+    }
+  }
   if (fs.existsSync(userEnvPath())) {
-    Object.assign(vars, parseEnv(fs.readFileSync(userEnvPath(), "utf8")));
+    const user = parseEnv(fs.readFileSync(userEnvPath(), "utf8"));
+    // Prefer user email; only override Supabase when the user file has real values
+    // (avoids wiping repo/CI config with empty keys from an earlier Save).
+    if (user.COMPANION_PORTAL_USER_EMAIL) {
+      vars.COMPANION_PORTAL_USER_EMAIL = user.COMPANION_PORTAL_USER_EMAIL;
+    }
+    if (user.SUPABASE_URL) vars.SUPABASE_URL = user.SUPABASE_URL;
+    if (user.SUPABASE_ANON_KEY) vars.SUPABASE_ANON_KEY = user.SUPABASE_ANON_KEY;
   }
   return vars;
 }
@@ -79,6 +97,19 @@ function tsxCli() {
   return path.join(agentRoot(), "node_modules", "tsx", "dist", "cli.mjs");
 }
 
+function emitStatus(snapshot) {
+  if (!snapshot) return;
+  mainWindow?.webContents.send("status", snapshot);
+}
+
+function pipeOutput(chunk) {
+  const text = chunk.toString();
+  mainWindow?.webContents.send("log", text);
+  process.stdout.write(text);
+  const next = statusTracker.ingest(text);
+  if (next) emitStatus(next);
+}
+
 function spawnAgentScript(scriptRel, label) {
   return new Promise((resolve, reject) => {
     const cli = tsxCli();
@@ -94,26 +125,27 @@ function spawnAgentScript(scriptRel, label) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const append = (chunk) => {
-      const text = chunk.toString();
-      mainWindow?.webContents.send("log", text);
-      process.stdout.write(text);
-    };
-
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
+    child.stdout.on("data", pipeOutput);
+    child.stderr.on("data", pipeOutput);
     child.on("error", reject);
     child.on("close", (code) => {
+      if (label === "Agent") {
+        agentProcess = null;
+        const cleanExit = code === 0 || code === null || code === 15 || code === 143;
+        emitStatus(statusTracker.setPhase(
+          cleanExit ? "stopped" : "error",
+          cleanExit ? "Agent stopped" : `Agent exited unexpectedly (code ${code})`,
+        ));
+        mainWindow?.webContents.send("agent-stopped");
+        return;
+      }
       if (code === 0) resolve();
       else reject(new Error(`${label} exited with code ${code}`));
     });
 
     if (label === "Agent") {
       agentProcess = child;
-      child.on("close", () => {
-        agentProcess = null;
-        mainWindow?.webContents.send("agent-stopped");
-      });
+      emitStatus(statusTracker.setPhase("starting", "Starting agent…"));
       mainWindow?.webContents.send("agent-started");
       resolve();
     }
@@ -122,11 +154,12 @@ function spawnAgentScript(scriptRel, label) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 720,
-    height: 560,
-    minWidth: 520,
-    minHeight: 420,
+    width: 880,
+    height: 720,
+    minWidth: 640,
+    minHeight: 560,
     title: "Perfect Ventures Fetch Agent",
+    backgroundColor: "#e8edf3",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -160,6 +193,8 @@ ipcMain.handle("get-config", () => {
     supabaseConfigured: Boolean(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY),
     packaged: app.isPackaged,
     agentRoot: agentRoot(),
+    status: statusTracker.getState(),
+    running: Boolean(agentProcess),
   };
 });
 
@@ -178,6 +213,8 @@ ipcMain.handle("start-agent", async () => {
   if (!cfg.COMPANION_PORTAL_USER_EMAIL?.trim()) {
     throw new Error("Enter your Caliber portal email first");
   }
+  statusTracker.reset("Starting agent…");
+  emitStatus(statusTracker.getState());
   await spawnAgentScript("src/main.ts", "Agent");
 });
 
@@ -186,10 +223,36 @@ ipcMain.handle("stop-agent", () => {
     agentProcess.kill("SIGTERM");
     agentProcess = null;
   }
+  emitStatus(statusTracker.setPhase("stopped", "Agent stopped"));
 });
 
-ipcMain.handle("login-instahyre", () => spawnAgentScript("src/scripts/login-instahyre.ts", "Instahyre login"));
-ipcMain.handle("login-naukri", () => spawnAgentScript("src/scripts/login-naukri.ts", "Naukri login"));
+ipcMain.handle("login-instahyre", async () => {
+  emitStatus(statusTracker.setPhase("login", "Opening Instahyre login in Chrome…"));
+  try {
+    await spawnAgentScript("src/scripts/login-instahyre.ts", "Instahyre login");
+    emitStatus(statusTracker.setPhase(
+      agentProcess ? "ready" : "stopped",
+      "Instahyre login finished",
+    ));
+  } catch (err) {
+    emitStatus(statusTracker.setPhase("error", err.message || "Instahyre login failed"));
+    throw err;
+  }
+});
+
+ipcMain.handle("login-naukri", async () => {
+  emitStatus(statusTracker.setPhase("login", "Opening Naukri login in Chrome…"));
+  try {
+    await spawnAgentScript("src/scripts/login-naukri.ts", "Naukri login");
+    emitStatus(statusTracker.setPhase(
+      agentProcess ? "ready" : "stopped",
+      "Naukri login finished",
+    ));
+  } catch (err) {
+    emitStatus(statusTracker.setPhase("error", err.message || "Naukri login failed"));
+    throw err;
+  }
+});
 
 ipcMain.handle("open-perfect-ventures-folder", () => {
   const dir = path.join(require("node:os").homedir(), "PerfectVentures");

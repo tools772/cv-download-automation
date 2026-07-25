@@ -3,6 +3,9 @@ name: Build installers
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+      - dev
     tags:
       - "v*"
 
@@ -18,6 +21,9 @@ jobs:
   build:
     name: Build (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    # Branch-specific GitHub Environment → matching Supabase project secrets.
+    # Secret names stay identical; only the environment changes.
+    environment: ${{ github.ref == 'refs/heads/dev' && 'dev' || 'main' }}
     timeout-minutes: 90
     strategy:
       fail-fast: true
@@ -74,8 +80,8 @@ jobs:
         shell: bash
         run: |
           if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
-            echo "::error::Missing GitHub Actions secrets SUPABASE_URL and/or SUPABASE_ANON_KEY."
-            echo "Add them under Settings → Secrets and variables → Actions."
+            echo "::error::Missing environment secrets SUPABASE_URL and/or SUPABASE_ANON_KEY."
+            echo "Add them under Settings → Environments → ${{ github.ref == 'refs/heads/dev' && 'dev' || 'main' }} → Environment secrets."
             exit 1
           fi
 

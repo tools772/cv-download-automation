@@ -100,6 +100,7 @@ export async function processInstahyreJob(job: FetchJobRow): Promise<void> {
   console.log(`[agent] Instahyre fetch job ${job.id} → ${sourceUrl}`);
 
   if (!(await hasInstahyreSession())) {
+    console.log(`[agent] Needs Login — no Instahyre session for job ${job.id}`);
     await markJobNeedsLogin(job.id, "No Instahyre session. Run: npm run login-instahyre");
     return;
   }
@@ -154,6 +155,10 @@ export async function processInstahyreJob(job: FetchJobRow): Promise<void> {
     skipped: stats.skipped,
     failed: stats.failed,
   });
+  console.log(
+    `[agent] Download complete — job ${job.id} ready for ranking ` +
+      `(uploaded=${stats.uploaded || stats.success || stats.downloaded || 0})`,
+  );
 }
 
 export async function processNaukriJob(job: FetchJobRow): Promise<void> {
@@ -210,6 +215,10 @@ export async function processNaukriJob(job: FetchJobRow): Promise<void> {
     skipped: stats.skipped,
     failed: stats.failed,
   });
+  console.log(
+    `[agent] Download complete — job ${job.id} ready for ranking ` +
+      `(uploaded=${stats.uploaded || stats.success || stats.downloaded || 0})`,
+  );
 }
 
 export async function processFetchJob(job: FetchJobRow): Promise<void> {

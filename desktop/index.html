@@ -7,35 +7,92 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header>
-    <h1>Perfect Ventures Fetch Agent</h1>
-    <p class="subtitle">Instahyre &amp; Naukri CV download for Caliber</p>
+  <header class="top">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"></div>
+      <div>
+        <h1>Perfect Ventures Fetch Agent</h1>
+        <p class="subtitle">Instahyre &amp; Naukri · Caliber companion</p>
+      </div>
+    </div>
+    <div id="status-pill" class="pill stopped" role="status">
+      <span class="pill-dot" aria-hidden="true"></span>
+      <span id="status-label">Stopped</span>
+    </div>
   </header>
 
-  <section class="card">
+  <section class="card setup">
     <label for="email">Caliber portal email</label>
     <div class="row">
-      <input id="email" type="email" placeholder="you@perfect.ventures" />
+      <input id="email" type="email" placeholder="you@perfect.ventures" autocomplete="username" />
       <button id="save-email" type="button">Save</button>
     </div>
     <p id="config-hint" class="hint"></p>
   </section>
 
-  <section class="card actions">
-    <button id="start" class="primary">Start agent</button>
-    <button id="stop" disabled>Stop</button>
-    <button id="login-in">Login Instahyre</button>
-    <button id="login-nk">Login Naukri</button>
-    <button id="open-sessions" class="ghost">Open sessions folder</button>
+  <section class="card status-panel">
+    <div class="status-main">
+      <p class="status-kicker" id="status-kicker">Current activity</p>
+      <p class="status-message" id="status-message">Agent is stopped. Enter your email and press Start.</p>
+      <div class="meta-row">
+        <span id="provider-badge" class="badge hidden"></span>
+        <span id="job-badge" class="badge muted hidden"></span>
+      </div>
+    </div>
+    <div class="metrics" aria-label="Download counts">
+      <div class="metric">
+        <span class="metric-value" id="count-discovered">0</span>
+        <span class="metric-label">Found</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value" id="count-downloaded">0</span>
+        <span class="metric-label">Downloaded</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value" id="count-uploaded">0</span>
+        <span class="metric-label">Uploaded</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value" id="count-failed">0</span>
+        <span class="metric-label">Failed</span>
+      </div>
+    </div>
   </section>
 
-  <section class="card">
-    <h2>Log</h2>
-    <pre id="log"></pre>
+  <section class="card actions">
+    <div class="action-primary">
+      <button id="start" class="primary" type="button">Start agent</button>
+      <button id="stop" type="button" disabled>Stop</button>
+    </div>
+    <div class="action-secondary">
+      <button id="login-in" type="button">Login Instahyre</button>
+      <button id="login-nk" type="button">Login Naukri</button>
+      <button id="open-sessions" class="ghost" type="button">Open sessions folder</button>
+    </div>
+  </section>
+
+  <section class="card activity-card">
+    <div class="section-head">
+      <h2>Activity</h2>
+      <button id="clear-activity" class="ghost tiny" type="button">Clear</button>
+    </div>
+    <ul id="activity" class="activity-list" aria-live="polite">
+      <li class="activity-empty">Nothing yet — start the agent to see live progress here.</li>
+    </ul>
+  </section>
+
+  <section class="card log-card">
+    <details id="log-details">
+      <summary>
+        <span>Technical log</span>
+        <span class="summary-hint">raw output · for troubleshooting</span>
+      </summary>
+      <pre id="log"></pre>
+    </details>
   </section>
 
   <footer>
-    Keep this app running while using <strong>Fetch CVs &amp; Rank</strong> in Caliber.
+    Keep this app open while using <strong>Fetch CVs &amp; Rank</strong> in Caliber.
     Connect Google Drive in the portal first.
   </footer>
 

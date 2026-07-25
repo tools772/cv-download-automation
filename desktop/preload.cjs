@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("fetchAgent", {
   loginNaukri: () => ipcRenderer.invoke("login-naukri"),
   openSessionsFolder: () => ipcRenderer.invoke("open-perfect-ventures-folder"),
   onLog: (cb) => ipcRenderer.on("log", (_e, text) => cb(text)),
+  onStatus: (cb) => ipcRenderer.on("status", (_e, status) => cb(status)),
   onAgentStarted: (cb) => ipcRenderer.on("agent-started", () => cb()),
   onAgentStopped: (cb) => ipcRenderer.on("agent-stopped", () => cb()),
 });
