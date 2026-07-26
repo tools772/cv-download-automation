@@ -17,7 +17,12 @@ function isLoginLikePage(url: string, bodyText: string): boolean {
 export async function connectInstahyre(candidatesUrl?: string): Promise<void> {
   await ensurePerfectVenturesDir();
 
-  const browser = await chromium.launch({ headless: false, channel: "chrome" });
+  const browser = await chromium.launch({ headless: false, channel: "chrome" }).catch(async (err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/executable doesn.?t exist|channel/i.test(msg)) throw err;
+    console.warn("Google Chrome not found — trying bundled Chromium…");
+    return chromium.launch({ headless: false });
+  });
   const context = await browser.newContext();
   const page = await context.newPage();
 

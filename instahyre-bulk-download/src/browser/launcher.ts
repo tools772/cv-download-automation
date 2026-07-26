@@ -33,13 +33,35 @@ export async function launchBrowser(
   const launchOpts = {
     headless,
     args: [...STABLE_LAUNCH_ARGS],
-    ignoreDefaultArgs: ['--enable-automation'],
+    ignoreDefaultArgs: ['--enable-automation'] as string[],
   };
 
   let browser: import('playwright').Browser;
-  // Always use bundled Chromium — attaching to system Chrome (channel: 'chrome') opens a
-  // second window beside the user's normal Chrome and is easy to close by mistake.
-  browser = await chromium.launch(launchOpts);
+  // Prefer bundled Chromium when present (CI/local). Packaged Windows/mac installers
+  // skip browser download, so fall back to system Google Chrome (same as Login Instahyre).
+  try {
+    browser = await chromium.launch(launchOpts);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/executable doesn.?t exist|browserType\.launch/i.test(msg)) {
+      throw err;
+    }
+    logger.warn('Bundled Chromium missing — launching system Google Chrome', { error: msg });
+    console.log(
+      'Bundled Chromium not found — using installed Google Chrome. Install Chrome if this fails.',
+    );
+    try {
+      browser = await chromium.launch({ ...launchOpts, channel: 'chrome' });
+    } catch (chromeErr) {
+      const chromeMsg = chromeErr instanceof Error ? chromeErr.message : String(chromeErr);
+      throw new Error(
+        `Could not launch a browser for Instahyre.\n` +
+          `Bundled Chromium is missing and Google Chrome was not found.\n` +
+          `Install Google Chrome, then retry.\n` +
+          `(${chromeMsg})`,
+      );
+    }
+  }
 
   browser.on('disconnected', () => {
     logger.error('Browser process disconnected unexpectedly');

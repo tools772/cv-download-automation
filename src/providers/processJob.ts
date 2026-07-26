@@ -101,7 +101,10 @@ export async function processInstahyreJob(job: FetchJobRow): Promise<void> {
 
   if (!(await hasInstahyreSession())) {
     console.log(`[agent] Needs Login — no Instahyre session for job ${job.id}`);
-    await markJobNeedsLogin(job.id, "No Instahyre session. Run: npm run login-instahyre");
+    await markJobNeedsLogin(
+      job.id,
+      "No Instahyre session. In the Fetch Agent app, click Login Instahyre, sign in in Chrome, then retry.",
+    );
     return;
   }
 
