@@ -28,13 +28,30 @@ export async function connectNaukri(startUrl?: string): Promise<void> {
   await ensurePerfectVenturesDir();
   await fs.ensureDir(naukriChromeProfileDir);
 
-  const context = await chromium.launchPersistentContext(naukriChromeProfileDir, {
+  const profileOptions = {
     headless: false,
-    channel: "chrome",
     acceptDownloads: true,
     locale: "en-IN",
     timezoneId: "Asia/Kolkata",
-  });
+  };
+
+  const context = await chromium
+    .launchPersistentContext(naukriChromeProfileDir, {
+      ...profileOptions,
+      channel: "chrome",
+    })
+    .catch(async (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`Google Chrome not available (${msg}) — trying bundled Chromium…`);
+      return chromium
+        .launchPersistentContext(naukriChromeProfileDir, profileOptions)
+        .catch(() => {
+          throw new Error(
+            "Could not launch a browser for Naukri login.\n" +
+              "Install Google Chrome (https://www.google.com/chrome/), then click Login Naukri again.",
+          );
+        });
+    });
 
   const page = context.pages()[0] ?? (await context.newPage());
   const url = startUrl?.trim() || NAUKRI_LOGIN;

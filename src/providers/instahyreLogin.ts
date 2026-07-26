@@ -21,7 +21,12 @@ export async function connectInstahyre(candidatesUrl?: string): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     if (!/executable doesn.?t exist|channel/i.test(msg)) throw err;
     console.warn("Google Chrome not found — trying bundled Chromium…");
-    return chromium.launch({ headless: false });
+    return chromium.launch({ headless: false }).catch(() => {
+      throw new Error(
+        "Could not launch a browser for Instahyre login.\n" +
+          "Install Google Chrome (https://www.google.com/chrome/), then click Login Instahyre again.",
+      );
+    });
   });
   const context = await browser.newContext();
   const page = await context.newPage();

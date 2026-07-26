@@ -1,10 +1,15 @@
+import os from 'node:os';
 import path from 'node:path';
 import winston from 'winston';
-import fs from 'fs-extra';
 import { projectRoot } from '../config/env.js';
+import { resolveWritableDir } from './writableDir.js';
 
-const logsDir = path.join(projectRoot, 'logs');
-fs.ensureDirSync(logsDir);
+// Packaged installs may sit in Program Files / /Applications, where the app
+// directory is not writable. Fall back to the user's PerfectVentures folder.
+const logsDir = resolveWritableDir(
+  path.join(projectRoot, 'logs'),
+  path.join(os.homedir(), 'PerfectVentures', 'logs'),
+);
 
 const logFormat = winston.format.combine(
   winston.format.timestamp(),

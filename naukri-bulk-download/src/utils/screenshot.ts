@@ -1,13 +1,17 @@
+import os from 'node:os';
 import path from 'node:path';
-import fs from 'fs-extra';
 import type { Page } from 'playwright';
 import { projectRoot } from '../config/env.js';
 import { logger } from './logger.js';
+import { resolveWritableDir } from './writableDir.js';
 
-const screenshotDir = path.join(projectRoot, 'sessions', 'screenshots');
+let screenshotDir: string | null = null;
 
 export async function ensureScreenshotDir(): Promise<string> {
-  await fs.ensureDir(screenshotDir);
+  screenshotDir ??= resolveWritableDir(
+    path.join(projectRoot, 'sessions', 'screenshots'),
+    path.join(os.homedir(), 'PerfectVentures', 'screenshots'),
+  );
   return screenshotDir;
 }
 

@@ -24,6 +24,23 @@ export function getNaukriChromeProfileDir(config: AppConfig): string {
   return path.join(config.sessionDir, 'naukri-chrome-profile');
 }
 
+/** Playwright's "browser binary not installed" failure, for either channel. */
+export function isMissingBrowserError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /executable doesn.?t exist|please run the following command to download|channel .* is not installed/i.test(
+    msg,
+  );
+}
+
+export function missingBrowserMessage(detail: string): string {
+  return (
+    'Could not launch a browser for Naukri.\n' +
+    'Google Chrome was not found and this build has no bundled Chromium.\n' +
+    'Install Google Chrome (https://www.google.com/chrome/), then retry.\n' +
+    `(${detail})`
+  );
+}
+
 async function applyContextHardening(
   context: BrowserContext,
   config: AppConfig,
@@ -158,10 +175,19 @@ async function launchPersistentChrome(
     logger.warn('Chrome channel unavailable, using bundled Chromium', {
       error: err instanceof Error ? err.message : String(err),
     });
-    context = await chromium.launchPersistentContext(profileDir, {
-      ...contextOptions,
-      channel: undefined,
-    });
+    try {
+      context = await chromium.launchPersistentContext(profileDir, {
+        ...contextOptions,
+        channel: undefined,
+      });
+    } catch (fallbackErr) {
+      if (isMissingBrowserError(err) && isMissingBrowserError(fallbackErr)) {
+        throw new Error(
+          missingBrowserMessage(fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)),
+        );
+      }
+      throw fallbackErr;
+    }
   }
 
   await applyContextHardening(context, config);
@@ -215,19 +241,26 @@ export async function launchBrowser(
     proxy: proxyServer ? { server: proxyServer } : undefined,
   };
 
+  // Packaged installers ship without Playwright's Chromium, so always keep a
+  // system-Chrome path available regardless of manualDownloadSave.
   let browser: Browser;
-  if (config.manualDownloadSave) {
+  try {
+    browser = await chromium.launch({ ...launchOpts, channel: 'chrome' });
+    logger.info('Using installed Google Chrome');
+  } catch (err) {
+    logger.warn('Chrome channel unavailable, trying bundled Chromium', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     try {
-      browser = await chromium.launch({ ...launchOpts, channel: 'chrome' });
-      logger.info('Using installed Google Chrome');
-    } catch (err) {
-      logger.warn('Chrome channel unavailable, using bundled Chromium', {
-        error: err instanceof Error ? err.message : String(err),
-      });
       browser = await chromium.launch(launchOpts);
+    } catch (fallbackErr) {
+      if (isMissingBrowserError(err) && isMissingBrowserError(fallbackErr)) {
+        throw new Error(
+          missingBrowserMessage(fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)),
+        );
+      }
+      throw fallbackErr;
     }
-  } else {
-    browser = await chromium.launch(launchOpts);
   }
 
   const screenWidth = viewport.width + Math.floor(Math.random() * 4) * 10;

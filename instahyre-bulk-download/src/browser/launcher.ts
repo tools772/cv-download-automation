@@ -37,28 +37,23 @@ export async function launchBrowser(
   };
 
   let browser: import('playwright').Browser;
-  // Prefer bundled Chromium when present (CI/local). Packaged Windows/mac installers
-  // skip browser download, so fall back to system Google Chrome (same as Login Instahyre).
+  // Match Login Instahyre: system Chrome first. Packaged installers skip the
+  // Playwright browser download, so bundled Chromium is only a dev fallback.
   try {
-    browser = await chromium.launch(launchOpts);
+    browser = await chromium.launch({ ...launchOpts, channel: 'chrome' });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (!/executable doesn.?t exist|browserType\.launch/i.test(msg)) {
-      throw err;
-    }
-    logger.warn('Bundled Chromium missing — launching system Google Chrome', { error: msg });
-    console.log(
-      'Bundled Chromium not found — using installed Google Chrome. Install Chrome if this fails.',
-    );
+    logger.warn('Google Chrome unavailable — trying bundled Chromium', { error: msg });
     try {
-      browser = await chromium.launch({ ...launchOpts, channel: 'chrome' });
-    } catch (chromeErr) {
-      const chromeMsg = chromeErr instanceof Error ? chromeErr.message : String(chromeErr);
+      browser = await chromium.launch(launchOpts);
+    } catch (chromiumErr) {
+      const chromiumMsg =
+        chromiumErr instanceof Error ? chromiumErr.message : String(chromiumErr);
       throw new Error(
         `Could not launch a browser for Instahyre.\n` +
-          `Bundled Chromium is missing and Google Chrome was not found.\n` +
-          `Install Google Chrome, then retry.\n` +
-          `(${chromeMsg})`,
+          `Google Chrome was not found and this build has no bundled Chromium.\n` +
+          `Install Google Chrome (https://www.google.com/chrome/), then retry.\n` +
+          `(${chromiumMsg})`,
       );
     }
   }

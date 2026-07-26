@@ -198,6 +198,12 @@ function parseAgentLine(line) {
   if (/Job .* cancelled|Cancelled — automation/i.test(line)) {
     return { phase: "ready", message: "Job cancelled" };
   }
+  if (/Could not launch a browser|Install Google Chrome|executable doesn.?t exist/i.test(line)) {
+    return {
+      phase: "error",
+      message: "Google Chrome is required — install Chrome, then try again.",
+    };
+  }
   if (/\[agent\] Fatal:|exited with code/i.test(line)) {
     return { phase: "error", message: line.replace(/^\[agent\]\s*/i, "").slice(0, 180) };
   }

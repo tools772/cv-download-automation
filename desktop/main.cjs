@@ -8,6 +8,30 @@ let mainWindow = null;
 let agentProcess = null;
 const statusTracker = createStatusTracker();
 
+/**
+ * On Windows child.kill() only ends the agent, orphaning the tsx download
+ * child and its Chrome window. taskkill /T ends the whole tree.
+ */
+function killTree(child) {
+  if (!child?.pid) return;
+  if (process.platform === "win32") {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      return;
+    } catch {
+      // fall through to plain kill
+    }
+  }
+  try {
+    child.kill();
+  } catch {
+    // already dead
+  }
+}
+
 function agentRoot() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, "agent");
@@ -196,12 +220,12 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
-  if (agentProcess) agentProcess.kill();
+  killTree(agentProcess);
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
-  if (agentProcess) agentProcess.kill();
+  killTree(agentProcess);
 });
 
 ipcMain.handle("get-config", () => {
@@ -238,7 +262,7 @@ ipcMain.handle("start-agent", async () => {
 
 ipcMain.handle("stop-agent", () => {
   if (agentProcess) {
-    agentProcess.kill("SIGTERM");
+    killTree(agentProcess);
     agentProcess = null;
   }
   emitStatus(statusTracker.setPhase("stopped", "Agent stopped"));
