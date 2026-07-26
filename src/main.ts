@@ -1,4 +1,4 @@
-import { assertConfig, portalUserEmail, perfectVenturesHome } from "./config.js";
+import { assertConfig, portalUserEmail, perfectVenturesHome, supabaseUrl } from "./config.js";
 import { registerAgent } from "./supabase/agents.js";
 import { startPoller, stopPoller } from "./poller.js";
 import { ensurePerfectVenturesDir } from "./storage/session.js";
@@ -10,6 +10,12 @@ async function main(): Promise<void> {
   console.log("Perfect Ventures Fetch Agent");
   console.log(`Version 0.1.0 | Providers: Instahyre, Naukri`);
   console.log(`Session dir: ${perfectVenturesHome}`);
+  try {
+    const host = new URL(supabaseUrl).host;
+    console.log(`Supabase: ${host}`);
+  } catch {
+    console.log(`Supabase: ${supabaseUrl}`);
+  }
   if (portalUserEmail) {
     console.log(`Portal user: ${portalUserEmail}`);
   } else {

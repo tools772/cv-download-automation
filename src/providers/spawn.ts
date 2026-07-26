@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { agentRoot } from "../config.js";
 
 export interface SpawnResult {
   code: number;
@@ -19,6 +22,23 @@ export class JobCancelledError extends Error {
 function killProcessTree(child: ChildProcess): void {
   const pid = child.pid;
   if (!pid) return;
+
+  if (process.platform === "win32") {
+    try {
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch {
+      try {
+        child.kill();
+      } catch {
+        // already dead
+      }
+    }
+    return;
+  }
+
   try {
     // Kill the whole process group when spawned detached.
     process.kill(-pid, "SIGTERM");
@@ -42,6 +62,48 @@ function killProcessTree(child: ChildProcess): void {
   }, 2500).unref?.();
 }
 
+function findTsxCli(cwd: string): string {
+  const candidates = [
+    path.join(cwd, "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(agentRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    `tsx not found under ${cwd}. Reinstall the Fetch Agent (system npm is not required).`,
+  );
+}
+
+/** Resolve `package.json` script → TypeScript entry (e.g. download-resdex → src/scripts/...). */
+function resolveNpmScriptEntry(cwd: string, script: string): string {
+  const pkgPath = path.join(cwd, "package.json");
+  if (!fs.existsSync(pkgPath)) {
+    throw new Error(`Missing package.json in ${cwd}`);
+  }
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+    scripts?: Record<string, string>;
+  };
+  const cmd = pkg.scripts?.[script];
+  if (!cmd) {
+    throw new Error(`Unknown script "${script}" in ${pkgPath}`);
+  }
+  const match = cmd.match(/\btsx(?:\s+watch)?\s+(\S+\.ts[x]?)/);
+  if (!match?.[1]) {
+    throw new Error(`Script "${script}" is not a tsx entrypoint: ${cmd}`);
+  }
+  const entry = path.resolve(cwd, match[1]);
+  if (!fs.existsSync(entry)) {
+    throw new Error(`Script entry missing: ${entry}`);
+  }
+  return entry;
+}
+
+/**
+ * Run a package.json script without calling system `npm`.
+ * Packaged Electron apps often have no npm on PATH → spawn npm ENOENT.
+ * Uses the same Electron-as-Node + bundled tsx pattern as the desktop shell.
+ */
 export function runNpmScript(
   cwd: string,
   script: string,
@@ -69,7 +131,24 @@ export function runNpmScript(
       }
     }
 
-    const childEnv = { ...cleanedEnv, ...env, PLAYWRIGHT_BROWSERS_PATH: "" };
+    const childEnv: NodeJS.ProcessEnv = {
+      ...cleanedEnv,
+      ...env,
+      PLAYWRIGHT_BROWSERS_PATH: "",
+    };
+    if (process.versions.electron) {
+      childEnv.ELECTRON_RUN_AS_NODE = "1";
+    }
+
+    let tsxCli: string;
+    let entry: string;
+    try {
+      tsxCli = findTsxCli(cwd);
+      entry = resolveNpmScriptEntry(cwd, script);
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
 
     if (env.INSTAHYRE_CANDIDATES_URL) {
       console.log(`[agent] Instahyre candidates URL: ${env.INSTAHYRE_CANDIDATES_URL}`);
@@ -77,13 +156,15 @@ export function runNpmScript(
     if (env.RESDEX_SAVED_SEARCH_URL) {
       console.log(`[agent] Naukri Resdex URL: ${env.RESDEX_SAVED_SEARCH_URL}`);
     }
+    console.log(`[agent] Running ${script} via tsx (no system npm)`);
 
-    const child = spawn("npm", ["run", script, "--silent"], {
+    const child = spawn(process.execPath, [tsxCli, entry], {
       cwd,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
-      // Own process group so Cancel can kill npm + tsx + Chromium helpers.
-      detached: true,
+      // Process groups work on Unix; Windows cancel uses taskkill /T.
+      detached: process.platform !== "win32",
+      windowsHide: true,
     });
 
     let stdout = "";
